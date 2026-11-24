@@ -2,10 +2,17 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { isTimingComplete, SnapshotCache } from '../sidecars/usage_hud/lib/cache.mjs';
 
-function makePayload({ meteredSteps, generatorMatchedSteps, hasUsage = true, timingSource = 'generator' }) {
+function makePayload({
+  steps,
+  meteredSteps = steps,
+  generatorMatchedSteps,
+  hasUsage = true,
+  timingSource = 'generator',
+}) {
   return {
     hasUsage,
     summary: {
+      steps,
       meteredSteps,
       generatorMatchedSteps,
       timingSource,
@@ -14,12 +21,21 @@ function makePayload({ meteredSteps, generatorMatchedSteps, hasUsage = true, tim
 }
 
 describe('SnapshotCache completeness and retry policy', () => {
-  it('treats partial generator timing (99/100) as incomplete even when timingSource is generator', () => {
-    const partial = makePayload({ meteredSteps: 100, generatorMatchedSteps: 99, timingSource: 'generator' });
+  it('treats partial generator timing (including unmetered planner steps) as incomplete', () => {
+    const partial = makePayload({ steps: 100, generatorMatchedSteps: 99, timingSource: 'generator' });
     assert.equal(isTimingComplete(partial, true), false);
     assert.equal(isTimingComplete(partial, false), true);
 
-    const complete = makePayload({ meteredSteps: 100, generatorMatchedSteps: 100, timingSource: 'generator' });
+    // 2 metered steps matched, 1 unmetered step unmatched -> still incomplete (2/3)
+    const unmeteredGap = makePayload({
+      steps: 3,
+      meteredSteps: 2,
+      generatorMatchedSteps: 2,
+      timingSource: 'generator',
+    });
+    assert.equal(isTimingComplete(unmeteredGap, true), false);
+
+    const complete = makePayload({ steps: 100, generatorMatchedSteps: 100, timingSource: 'generator' });
     assert.equal(isTimingComplete(complete, true), true);
   });
 
@@ -30,8 +46,8 @@ describe('SnapshotCache completeness and retry policy', () => {
       steadyRetryMs: 300_000,
     });
     const sig = 'b1|100:50|0|0';
-    const partial = makePayload({ meteredSteps: 10, generatorMatchedSteps: 9 });
-    const complete = makePayload({ meteredSteps: 10, generatorMatchedSteps: 10 });
+    const partial = makePayload({ steps: 10, generatorMatchedSteps: 9 });
+    const complete = makePayload({ steps: 10, generatorMatchedSteps: 10 });
 
     cache.set('conv-1', sig, partial, { hasLs: true, now: 1000 });
 
@@ -61,9 +77,9 @@ describe('SnapshotCache completeness and retry policy', () => {
 
   it('evicts oldest entry when exceeding maxEntries', () => {
     const cache = new SnapshotCache({ maxEntries: 2 });
-    const p1 = makePayload({ meteredSteps: 1, generatorMatchedSteps: 1 });
-    const p2 = makePayload({ meteredSteps: 2, generatorMatchedSteps: 2 });
-    const p3 = makePayload({ meteredSteps: 3, generatorMatchedSteps: 3 });
+    const p1 = makePayload({ steps: 1, generatorMatchedSteps: 1 });
+    const p2 = makePayload({ steps: 2, generatorMatchedSteps: 2 });
+    const p3 = makePayload({ steps: 3, generatorMatchedSteps: 3 });
 
     cache.set('c1', 's1', p1, { hasLs: true, now: 1 });
     cache.set('c2', 's2', p2, { hasLs: true, now: 2 });

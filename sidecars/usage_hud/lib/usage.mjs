@@ -99,22 +99,24 @@ export function buildTurns(steps) {
   return turns.map((t, i) => ({ ...t, index: i }));
 }
 
-function allocateFromSource(plannerSteps, source, assigned) {
-  if (!source) return;
+/**
+ * Independently matches planner steps to timing records within a single source
+ * (Pass 1: exact `byStepIndex`, Pass 2: `bySecond` queue fallback), using a
+ * shared `consumed` Set so no entry in that source can be consumed twice.
+ */
+function matchSourceTimings(plannerSteps, source) {
+  const matched = new Map();
+  if (!source) return matched;
   const consumed = new Set();
 
   // Pass 1: exact step_index matches.
-  // Even if a step already received a higher-priority timing, reserve its own
-  // entry in this lower-priority source so another step in the same second
-  // cannot claim it during Pass 2.
   if (source.byStepIndex instanceof Map) {
     for (const d of plannerSteps) {
       if (typeof d.step_index !== 'number') continue;
       const entry = source.byStepIndex.get(d.step_index);
-      if (!entry || consumed.has(entry)) continue;
-      consumed.add(entry);
-      if (!assigned.has(d)) {
-        assigned.set(d, entry);
+      if (entry && !consumed.has(entry)) {
+        matched.set(d, entry);
+        consumed.add(entry);
       }
     }
   }
@@ -122,18 +124,20 @@ function allocateFromSource(plannerSteps, source, assigned) {
   // Pass 2: truncated-second queue fallback for remaining unmatched steps.
   if (source.bySecond instanceof Map) {
     for (const d of plannerSteps) {
-      if (assigned.has(d)) continue;
+      if (matched.has(d)) continue;
       const at = ms(d.created_at);
       if (at === null) continue;
       const queue = source.bySecond.get(Math.floor(at / 1000));
       if (!Array.isArray(queue)) continue;
       const entry = queue.find((candidate) => candidate && !consumed.has(candidate));
       if (entry) {
-        assigned.set(d, entry);
+        matched.set(d, entry);
         consumed.add(entry);
       }
     }
   }
+
+  return matched;
 }
 
 /**
@@ -148,16 +152,16 @@ export function hasUnmatchedPlannerSteps(steps, timings) {
   const plannerSteps = steps.filter(isPlanner);
   if (!plannerSteps.length) return false;
   if (!timings) return true;
-  const assigned = new Map();
-  allocateFromSource(plannerSteps, timings, assigned);
-  return assigned.size < plannerSteps.length;
+  return matchSourceTimings(plannerSteps, timings).size < plannerSteps.length;
 }
 
 /**
  * Allocates timing entries to planner steps across primary (Language Server)
- * and optional per-call fallback (SQLite `steps`) sources. Within each source,
- * exact `byStepIndex` matches run before `bySecond` fallback using a single
- * shared `consumed` Set so no timing record can ever be consumed twice.
+ * and optional per-call fallback (SQLite `steps`) sources. Each source performs
+ * its own independent step-to-timing matching first, and results are merged per
+ * step preferring primary over fallback. Separating alignment from source
+ * priority guarantees a step matched by primary can never leak its fallback
+ * record (via either index or timestamp) to another step.
  *
  * @param {Array<{ steps: Array<Record<string, unknown>> }>} visibleTurns
  * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
@@ -175,8 +179,13 @@ export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
     }
   }
 
-  allocateFromSource(plannerSteps, timings, assigned);
-  allocateFromSource(plannerSteps, fallbackTimings, assigned);
+  const primary = matchSourceTimings(plannerSteps, timings);
+  const fallback = matchSourceTimings(plannerSteps, fallbackTimings);
+
+  for (const d of plannerSteps) {
+    const entry = primary.get(d) ?? fallback.get(d);
+    if (entry) assigned.set(d, entry);
+  }
   return assigned;
 }
 
@@ -388,7 +397,7 @@ export function summarizeConversation(turns) {
   for (const t of turns) {
     for (const s of t.steps) {
       if (typeof s.thinking === 'number' && s.thinking > 0) thinking += s.thinking;
-      if (s.metered && s.timingSource) {
+      if (s.timingSource) {
         matchedSteps += 1;
         if (s.timingSource === 'generator') generatorMatchedSteps += 1;
         else if (s.timingSource === 'steps') stepsMatchedSteps += 1;

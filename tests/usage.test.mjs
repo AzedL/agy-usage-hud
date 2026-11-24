@@ -506,6 +506,23 @@ describe('turn grouping and aggregation', () => {
     // Step 11 has no timing in either source and must NOT steal Step 10's SQLite entry via bySecond
     assert.equal(snap.turns[0].steps[1].timingSource, null);
     assert.equal(snap.turns[0].steps[1].rate, null);
+
+    // Even when SQLite has NO matching byStepIndex (timestamp-only fallback), independent
+    // per-source alignment keeps Step 10's SQLite record from leaking to Step 11.
+    const sqliteBySecondOnly = {
+      byStepIndex: new Map(),
+      bySecond: new Map([[sec, [sqliteTimingB]]]),
+    };
+    const snapTsOnly = buildSnapshot({
+      conv: 'aaaa1111',
+      build: '1',
+      steps,
+      timings: lsTimings,
+      fallbackTimings: sqliteBySecondOnly,
+      meta: null,
+    });
+    assert.equal(snapTsOnly.turns[0].steps[0].timingSource, 'generator');
+    assert.equal(snapTsOnly.turns[0].steps[1].timingSource, null);
   });
 
   it('detects unmatched planner steps even when LS timing count equals metered step count', () => {
