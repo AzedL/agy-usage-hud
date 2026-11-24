@@ -9,8 +9,6 @@
 (function (global) {
   'use strict';
 
-  const MIN_RATE_STREAM_MS = 200;
-
   function fmt(n) {
     if (n === null || n === undefined || Number.isNaN(n)) return '\u2014';
     return Math.round(n).toLocaleString('en-US');
@@ -91,7 +89,7 @@
 
   /**
    * Formats `"in 2382 · cache 407.0k · out 1055 · 210.4 tok/s"` (or
-   * `"· ~45.0 tok/s"` when `estimatedRate` is true for SQLite coarse timings).
+   * `"· ~45.0 tok/s"` when `estimatedRate` is true for SQLite-derived timings).
    */
   function usageText(input, cache, output, rate, { estimatedRate = false } = {}) {
     const ratePrefix = estimatedRate ? '~' : '';
@@ -104,18 +102,6 @@
       tok(output) +
       (rate === null || rate === undefined ? '' : ' \u00b7 ' + ratePrefix + tps(rate) + ' tok/s')
     );
-  }
-
-  /**
-   * Returns the model's streaming rate, or `null` when missing or below
-   * `MIN_RATE_STREAM_MS`.
-   */
-  function stepRate(st) {
-    if (!st || st.rate === null || st.rate === undefined) return null;
-    if (st.streamMs !== null && st.streamMs !== undefined && st.streamMs < MIN_RATE_STREAM_MS) {
-      return null;
-    }
-    return st.rate;
   }
 
   /** Parses `rgb(...)` / `rgba(...)` computed colour strings. */
@@ -148,7 +134,6 @@
   }
 
   global.UsageHudFormat = {
-    MIN_RATE_STREAM_MS,
     fmt,
     tok,
     pct,
@@ -159,7 +144,6 @@
     clock,
     stepCountLabel,
     usageText,
-    stepRate,
     parseRgb,
     luminance,
     contrast,

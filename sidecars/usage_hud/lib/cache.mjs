@@ -3,7 +3,7 @@
  *
  * When the Antigravity Language Server is reachable, `GetCascadeTrajectory`
  * occasionally lags behind `transcript.jsonl` writes or recovers after a brief
- * restart/sleep. Tracking `generatorMatchedSteps < meteredSteps` ensures
+ * restart/sleep. Tracking `generatorMatchedSteps < steps` ensures
  * partially timed snapshots converge once LS catches up: retries step through
  * fast backoff delays (`retryDelaysMs`) and then settle into a low-frequency
  * steady probe interval (`steadyRetryMs`, default 5 minutes) instead of

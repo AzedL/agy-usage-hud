@@ -190,17 +190,26 @@ export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
 }
 
 /**
- * Estimates a planner call's completion timestamp.
- * When timing is available:
- *  - LS (`generator`): `created_at + ttftMs + streamMs`
- *  - SQLite (`steps`): `created_at + streamMs` (equals `viewableAt`)
- * Without timing, falls back to `created_at`.
+ * Estimates a planner call's end timestamp for computing wait gaps.
+ *  - When streaming completion is known (`streamMs > 0` or `hasCompletion`),
+ *    returns `created_at + ttftMs + streamMs` with `basis: 'completion'`.
+ *  - When only first-token timing is available (`ttftMs > 0`, e.g. SQLite row
+ *    without `completedAt`), returns `created_at + ttftMs` with
+ *    `basis: 'first-token'` so the UI never mislabels it as completion.
+ *  - Otherwise falls back to `created_at`.
  */
 function estimateStepEnd(at, timing) {
   if (at === null) return null;
   if (!timing) return { endAt: at, basis: 'created_at' };
-  const elapsed = (timing.ttftMs ?? 0) + (timing.streamMs ?? 0);
-  return { endAt: at + Math.max(0, elapsed), basis: 'completion' };
+  const ttft = typeof timing.ttftMs === 'number' && timing.ttftMs > 0 ? timing.ttftMs : 0;
+  const stream = typeof timing.streamMs === 'number' && timing.streamMs > 0 ? timing.streamMs : 0;
+  if (stream > 0 || timing.hasCompletion) {
+    return { endAt: at + ttft + stream, basis: 'completion' };
+  }
+  if (ttft > 0) {
+    return { endAt: at + ttft, basis: 'first-token' };
+  }
+  return { endAt: at, basis: 'created_at' };
 }
 
 /**
@@ -368,8 +377,8 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
 
 /**
  * Rolls up L2 turns into the L1 conversation summary.
- * Keeps `generator` (true streaming) and `steps` (TTFT + streaming) separate
- * when computing conversation-level TPS.
+ * Keeps `generator` (LS `streamingDuration`) and `steps` (SQLite
+ * `completedAt - viewableAt`) separate when computing conversation-level TPS.
  *
  * @param {ReturnType<typeof aggregateTurns>} turns
  */

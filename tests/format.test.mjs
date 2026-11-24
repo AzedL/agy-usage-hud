@@ -25,7 +25,6 @@ const {
   parseRgb,
   pct,
   stepCountLabel,
-  stepRate,
   tok,
   tps,
   usageText,
@@ -76,7 +75,7 @@ describe('frontend formatting helpers', () => {
     assert.equal(c, '17:23');
   });
 
-  it('classifies wait age, cache hit rate, and step rate thresholds', () => {
+  it('classifies wait age and cache hit rate', () => {
     assert.equal(ageClass(10_000), 'good');
     assert.equal(ageClass(120_000), 'mid');
     assert.equal(ageClass(300_000), 'bad');
@@ -84,9 +83,6 @@ describe('frontend formatting helpers', () => {
     assert.equal(hitClass(0.8), 'good');
     assert.equal(hitClass(0.5), 'mid');
     assert.equal(hitClass(0.49), 'bad');
-
-    assert.equal(stepRate({ rate: 200, streamMs: 199 }), null);
-    assert.equal(stepRate({ rate: 200, streamMs: 200 }), 200);
   });
 
   it('parses rgb/rgba and computes WCAG luminance and contrast', () => {

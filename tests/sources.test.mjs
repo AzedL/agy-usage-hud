@@ -190,9 +190,27 @@ describe('filesystem discovery and SQLite integration', () => {
       const stepBlob = Buffer.concat([
         encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_600), encodeVarintField(2, 0)])),
         encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_601), encodeVarintField(2, 500_000_000)])),
+        encodeBytesField(7, Buffer.concat([encodeVarintField(1, 1_795_441_603), encodeVarintField(2, 500_000_000)])),
         encodeBytesField(9, Buffer.concat([encodeVarintField(9, 100), encodeVarintField(10, 300)])),
       ]);
       db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(1, 15, stepBlob);
+
+      // Step 2: lacks /7 (completedAt) -> TTFT only, must NOT populate streamMs or hasCompletion
+      const ttftOnlyBlob = Buffer.concat([
+        encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_610), encodeVarintField(2, 0)])),
+        encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_612), encodeVarintField(2, 0)])),
+        encodeBytesField(9, Buffer.concat([encodeVarintField(9, 50), encodeVarintField(10, 200)])),
+      ]);
+      db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(2, 15, ttftOnlyBlob);
+
+      // Step 3: /7 equals /6 (0ms streaming) -> hasCompletion is true, streamMs stays null
+      const zeroStreamBlob = Buffer.concat([
+        encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_620), encodeVarintField(2, 0)])),
+        encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_621), encodeVarintField(2, 0)])),
+        encodeBytesField(7, Buffer.concat([encodeVarintField(1, 1_795_441_621), encodeVarintField(2, 0)])),
+        encodeBytesField(9, Buffer.concat([encodeVarintField(9, 80)])),
+      ]);
+      db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(3, 15, zeroStreamBlob);
       db.close();
 
       const { meta, stepTimings } = await loadDbData(tmp, conv, { includeStepTimings: true });
@@ -201,9 +219,19 @@ describe('filesystem discovery and SQLite integration', () => {
       assert.equal(meta.lastRowHasMax, true);
       assert.equal(meta.validRows, 1);
       assert.ok(stepTimings);
-      assert.equal(stepTimings.byStepIndex.get(1).streamMs, 1500);
+      assert.equal(stepTimings.byStepIndex.get(1).ttftMs, 1500);
+      assert.equal(stepTimings.byStepIndex.get(1).streamMs, 2000);
+      assert.equal(stepTimings.byStepIndex.get(1).hasCompletion, true);
       assert.equal(stepTimings.byStepIndex.get(1).response, 300);
       assert.equal(stepTimings.byStepIndex.get(1).thinking, 100);
+
+      assert.equal(stepTimings.byStepIndex.get(2).ttftMs, 2000);
+      assert.equal(stepTimings.byStepIndex.get(2).streamMs, null);
+      assert.equal(stepTimings.byStepIndex.get(2).hasCompletion, false);
+
+      assert.equal(stepTimings.byStepIndex.get(3).ttftMs, 1000);
+      assert.equal(stepTimings.byStepIndex.get(3).streamMs, null);
+      assert.equal(stepTimings.byStepIndex.get(3).hasCompletion, true);
 
       // Without LS env, loadMetricsData returns both meta and steps timings cleanly
       const metrics = await loadMetricsData(tmp, conv, { env: {} });

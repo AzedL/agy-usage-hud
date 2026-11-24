@@ -59,11 +59,12 @@ global `step_index`.
 Two values carry semantic colour:
 
 - **Wait duration** (at the end of a row's title): green `< 1m`, amber `< 5m`,
-  red `>= 5m`. When timing data is available, waits are measured from the
+  red `>= 5m`. When completion timing is available, waits are measured from the
   previous call's completion (`created_at + timeToFirstToken + streamingDuration`,
-  or `viewableAt` in the SQLite fallback) so the prior call's own generation
-  time is excluded; without timing data it falls back to creation-to-creation
-  intervals prefixed with `~` (e.g. `~+7.0m`, `gapBasis: 'created_at'`).
+  or `completedAt` in the SQLite fallback) so the prior call's own generation
+  time is excluded; if only first-token timing is available (`gapBasis: 'first-token'`)
+  or timing is unavailable (`gapBasis: 'created_at'`), waits are prefixed with
+  `~` (e.g. `~+7.0m`) with an explanatory tooltip.
   The first turn and its first step have nothing before them, so they show no wait.
 - **Cache hit rate** (right-hand column): green `>= 80%`, amber `>= 50%`, red
   `< 50%`.
@@ -87,11 +88,13 @@ streaming time, never an unweighted mean of per-step rates):
 - **Streaming time, not wall-clock call time.** The language server's
   `generatorMetadata` reports `streamingDuration` and `timeToFirstToken`
   separately. When the language server cannot be reached — or only covers a
-  subset of calls — the `steps` table (`createdAt` to `viewableAt`) serves as a
-  per-call fallback for unmatched calls. Turn and conversation `tok/s` never mix
-  the two methodologies: whenever `generator` samples exist, aggregated `tok/s`
-  is computed strictly from `generator` samples (`tpsSource: 'generator'`);
-  SQLite-only estimates are prefixed with `~` (`tpsSource: 'steps'`).
+  subset of calls — the SQLite `steps` table serves as a per-call fallback for
+  unmatched calls using `createdAt` to `viewableAt` as TTFT and `viewableAt` to
+  `completedAt` as streaming duration (rows missing `completedAt` record TTFT
+  only and never compute `tok/s`). Turn and conversation `tok/s` never mix the
+  two sources: whenever `generator` samples exist, aggregated `tok/s` is
+  computed strictly from `generator` samples (`tpsSource: 'generator'`);
+  SQLite-derived estimates are prefixed with `~` (`tpsSource: 'steps'`).
 - **Minimum streaming duration (`200 ms`).** Calls whose streaming window is
   under `200 ms` show their token counts without a throughput figure, since a
   handful of tokens over tens of milliseconds does not reflect sustained speed.

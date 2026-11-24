@@ -18,7 +18,6 @@
     parseRgb,
     pct,
     stepCountLabel,
-    stepRate,
     tok,
     tps,
     usageText,
@@ -54,15 +53,21 @@
 
   /**
    * Wait since the previous model call, coloured by its duration.
-   * When `basis === 'created_at'`, timing data was unavailable so the interval
-   * includes the prior call's execution time; prefix with `~` and add a tooltip.
+   * When completion timing is unavailable (`basis === 'first-token'` or
+   * `'created_at'`), prefix with `~` and explain what the interval includes.
    */
   function waitSpan(ms, basis) {
-    const approx = basis === 'created_at';
+    const approx = basis !== 'completion';
     const span = el('span', 't ' + ageClass(ms), (approx ? '~+' : '+') + dur(ms));
-    span.title = approx
-      ? 'Interval between call start times (timing unavailable; includes prior call duration)'
-      : 'Wait since previous call completed';
+    if (basis === 'completion') {
+      span.title = 'Wait since previous call completed';
+    } else if (basis === 'first-token') {
+      span.title =
+        'Wait since previous call first token (completion time unavailable; includes prior streaming duration)';
+    } else {
+      span.title =
+        'Interval between call start times (timing unavailable; includes prior call duration)';
+    }
     return span;
   }
 
@@ -87,8 +92,8 @@
         : '';
     if (source === 'steps') {
       return sample
-        ? `Estimated rate from SQLite timestamps (includes TTFT) \u2014 ${sample}`
-        : 'Estimated rate from SQLite timestamps (includes TTFT)';
+        ? `Estimated streaming rate from SQLite timestamps (viewableAt to completedAt) \u2014 ${sample}`
+        : 'Estimated streaming rate from SQLite timestamps (viewableAt to completedAt)';
     }
     if (source === 'generator' && sample) {
       return `Streaming rate \u2014 ${sample}`;
@@ -187,7 +192,7 @@
       if (st.gapMs !== null) line.append(waitSpan(st.gapMs, st.gapBasis));
       mid.append(line);
 
-      const stRate = stepRate(st);
+      const stRate = st.rate !== null && st.rate !== undefined ? st.rate : null;
       const coarseStepRate = stRate !== null && st.timingSource === 'steps';
       const detail = st.metered
         ? usageLine(
@@ -195,7 +200,7 @@
           )
         : usageLine('no usage');
       if (coarseStepRate) {
-        detail.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+        detail.title = 'Estimated streaming rate from SQLite timestamps (viewableAt to completedAt)';
       }
       mid.append(detail);
       row.append(mid, hitCell(st.hitRate));

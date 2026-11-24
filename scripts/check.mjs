@@ -3,15 +3,18 @@
  *
  * Checks:
  *  1. Node syntax (`node --check`) on every .mjs/.js file in sidecars/, scripts/, tests/.
- *  2. `plugin.json` schema and Antigravity allowed top-level keys.
- *  3. `sidecar.json` schema and entrypoint existence.
- *  4. `skills/usage-hud/SKILL.md` frontmatter presence.
- *  5. Required assets and web static files.
+ *  2. Classic-script syntax (`vm.Script`) on browser scripts under `sidecars/usage_hud/web/`
+ *     (and no `type="module"` `<script>` tags in `index.html`) for sandboxed iframe safety.
+ *  3. `plugin.json` schema and Antigravity allowed top-level keys.
+ *  4. `sidecar.json` schema and entrypoint existence.
+ *  5. `skills/usage-hud/SKILL.md` frontmatter presence.
+ *  6. Required assets and web static files.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -58,6 +61,25 @@ for (const file of jsFiles) {
     execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
   } catch (err) {
     fail(`Syntax error in ${relative(ROOT, file)}: ${err.stderr?.toString() || err.message}`);
+  }
+}
+
+// 1b. Classic-script validation for browser assets (package.json has "type": "module",
+// so `node --check` alone would allow ES module syntax that breaks in sandboxed iframes).
+const webDir = join(ROOT, 'sidecars', 'usage_hud', 'web');
+for (const file of collectJsFiles(webDir)) {
+  const rel = relative(ROOT, file);
+  try {
+    new vm.Script(readFileSync(file, 'utf-8'), { filename: rel });
+  } catch (err) {
+    fail(`Browser script ${rel} is not a valid classic script: ${err.message}`);
+  }
+}
+const indexHtmlPath = join(webDir, 'index.html');
+if (existsSync(indexHtmlPath)) {
+  const html = readFileSync(indexHtmlPath, 'utf-8');
+  if (/<script\b[^>]*\btype\s*=\s*["']?module\b/i.test(html)) {
+    fail('sidecars/usage_hud/web/index.html must not load scripts with type="module"');
   }
 }
 

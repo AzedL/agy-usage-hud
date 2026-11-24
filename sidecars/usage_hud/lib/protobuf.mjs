@@ -18,9 +18,11 @@ export const STEP_CREATED = '/1/1';
 export const STEP_CREATED_NANO = '/1/2';
 export const STEP_VIEWABLE = '/6/1';
 export const STEP_VIEWABLE_NANO = '/6/2';
+export const STEP_COMPLETED = '/7/1';
+export const STEP_COMPLETED_NANO = '/7/2';
 export const STEP_THINKING = '/9/9';
 export const STEP_RESPONSE = '/9/10';
-export const STEP_METADATA_PREFIXES = new Set(['', '/1', '/6', '/9']);
+export const STEP_METADATA_PREFIXES = new Set(['', '/1', '/6', '/7', '/9']);
 
 const MAX_PROTO_FIELD_NUMBER = 536870911; // 2^29 - 1
 const UNGUIDED_MAX_FIELD_NUMBER = 20000;

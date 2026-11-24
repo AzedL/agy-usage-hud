@@ -14,6 +14,8 @@ import {
   ESTIMATED_USED_PATH,
   GEN_METADATA_PREFIXES,
   MAX_CONTEXT_PATH,
+  STEP_COMPLETED,
+  STEP_COMPLETED_NANO,
   STEP_CREATED,
   STEP_CREATED_NANO,
   STEP_METADATA_PREFIXES,
@@ -398,16 +400,33 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
           const created = f.get(STEP_CREATED);
           const viewable = f.get(STEP_VIEWABLE);
           if (typeof created !== 'number' || typeof viewable !== 'number') continue;
-          const genMs =
+          const rawTtftMs =
             (viewable - created) * 1000 +
             Math.round(((f.get(STEP_VIEWABLE_NANO) ?? 0) - (f.get(STEP_CREATED_NANO) ?? 0)) / 1e6);
-          if (genMs <= 0) continue;
+          const ttftMs = rawTtftMs > 0 ? rawTtftMs : null;
+
+          const completed = f.get(STEP_COMPLETED);
+          let streamMs = null;
+          let hasCompletion = false;
+          if (typeof completed === 'number') {
+            const rawStreamMs =
+              (completed - viewable) * 1000 +
+              Math.round(
+                ((f.get(STEP_COMPLETED_NANO) ?? 0) - (f.get(STEP_VIEWABLE_NANO) ?? 0)) / 1e6,
+              );
+            if (rawStreamMs >= 0) {
+              hasCompletion = true;
+              if (rawStreamMs > 0) streamMs = rawStreamMs;
+            }
+          }
+          if (ttftMs === null && streamMs === null) continue;
 
           const response = f.get(STEP_RESPONSE) ?? null;
           const thinking = f.get(STEP_THINKING) ?? null;
           const entry = {
-            streamMs: genMs,
-            ttftMs: null,
+            streamMs,
+            ttftMs,
+            hasCompletion,
             response,
             thinking,
             hasSplit: response !== null || thinking !== null,

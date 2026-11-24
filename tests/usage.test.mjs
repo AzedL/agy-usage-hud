@@ -394,12 +394,45 @@ describe('turn grouping and aggregation', () => {
       count: 1,
       source: 'generator',
     };
-    // SQLite has step 1, step 2 (coarse 10s wall-clock -> 20 tok/s), and step 4.
+    // SQLite has step 1, step 2 (2s TTFT + 8s stream -> 25 tok/s, ends at +10s), and step 4 (1s TTFT + 2s stream -> 50 tok/s).
     const sqliteFallback = {
       byStepIndex: new Map([
-        [1, { streamMs: 1500, ttftMs: null, response: 200, thinking: 0, hasSplit: true, source: 'steps' }],
-        [2, { streamMs: 10_000, ttftMs: null, response: 200, thinking: 0, hasSplit: true, source: 'steps' }],
-        [4, { streamMs: 2000, ttftMs: null, response: 100, thinking: 0, hasSplit: true, source: 'steps' }],
+        [
+          1,
+          {
+            streamMs: 1000,
+            ttftMs: 500,
+            hasCompletion: true,
+            response: 200,
+            thinking: 0,
+            hasSplit: true,
+            source: 'steps',
+          },
+        ],
+        [
+          2,
+          {
+            streamMs: 8000,
+            ttftMs: 2000,
+            hasCompletion: true,
+            response: 200,
+            thinking: 0,
+            hasSplit: true,
+            source: 'steps',
+          },
+        ],
+        [
+          4,
+          {
+            streamMs: 2000,
+            ttftMs: 1000,
+            hasCompletion: true,
+            response: 100,
+            thinking: 0,
+            hasSplit: true,
+            source: 'steps',
+          },
+        ],
       ]),
       bySecond: new Map(),
       count: 3,
@@ -419,8 +452,8 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snap.turns[0].steps[0].timingSource, 'generator');
     assert.equal(snap.turns[0].steps[0].rate, 200);
     assert.equal(snap.turns[0].steps[1].timingSource, 'steps');
-    assert.equal(snap.turns[0].steps[1].rate, 20);
-    // Turn 2's wait benefits from Step 2's SQLite completion time (10:00:10 + 10s = 10:00:20 -> 40s wait, not 50s!)
+    assert.equal(snap.turns[0].steps[1].rate, 25);
+    // Turn 2's wait benefits from Step 2's SQLite completion time (10:00:10 + 2s TTFT + 8s stream = 10:00:20 -> 40s wait)
     assert.equal(snap.turns[1].gapBeforeMs, 40_000);
     assert.equal(snap.turns[1].gapBeforeBasis, 'completion');
 
@@ -594,5 +627,65 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snap.summary.contextMax, 512_000);
     assert.equal(snap.summary.contextWindowAligned, false);
     assert.equal(snap.context.alignmentReason, 'latest-step-unmetered');
+  });
+
+  it('never computes TPS from TTFT-only SQLite rows and marks gapBasis as first-token', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:00Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 5000,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:30Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 200,
+      },
+    ];
+
+    // Step 1 has TTFT (10s) without completedAt -> streamMs is null, hasCompletion is false.
+    const ttftOnlyTimings = {
+      byStepIndex: new Map([
+        [
+          1,
+          {
+            streamMs: null,
+            ttftMs: 10_000,
+            hasCompletion: false,
+            response: 5000,
+            thinking: 0,
+            hasSplit: true,
+            source: 'steps',
+          },
+        ],
+      ]),
+      bySecond: new Map(),
+      count: 1,
+      source: 'steps',
+    };
+
+    const snap = buildSnapshot({
+      conv: 'aaaa1111',
+      build: '1',
+      steps,
+      timings: ttftOnlyTimings,
+      meta: null,
+    });
+
+    assert.equal(snap.turns[0].steps[0].rate, null);
+    assert.equal(snap.turns[0].tps, null);
+    assert.equal(snap.summary.tps, null);
+    // Gap from Step 1 first-token (10:00:10) to Step 2 start (10:00:30) = 20s, labeled 'first-token'
+    assert.equal(snap.turns[0].steps[1].gapMs, 20_000);
+    assert.equal(snap.turns[0].steps[1].gapBasis, 'first-token');
   });
 });
