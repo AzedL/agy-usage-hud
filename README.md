@@ -100,16 +100,22 @@ streaming time, never an unweighted mean of per-step rates):
 
 ## Install
 
+Install directly from GitHub with the Antigravity CLI:
+
+```bash
+agy plugin install https://github.com/AzedL/agy-usage-hud
+```
+
+> **Upgrading on Windows:** While the plugin is enabled, the running sidecar
+> holds a directory lock on `sidecars/usage_hud`. Disable the plugin first (in
+> **Customizations -> Installed** or via `agy plugin disable agy-usage-hud`),
+> re-run `agy plugin install`, then re-enable it.
+
+Or build a minimal bundle locally (excluding tests and scripts) and install it:
+
 ```bash
 npm run build
 agy plugin install dist/agy-usage-hud
-```
-
-Or validate and install directly from the repository root:
-
-```bash
-agy plugin validate . --strict
-agy plugin install .
 ```
 
 Or copy `dist/agy-usage-hud/` into `~/.gemini/config/plugins/agy-usage-hud/`

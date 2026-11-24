@@ -122,16 +122,16 @@ app.page(
   '/',
   () =>
     new Response(readFileSync(join(WEB_DIR, 'index.html'), 'utf-8'), {
-      contentType: 'text/html; charset=utf-8',
+      contentType: 'text/html',
       headers: NO_STORE,
     }),
 );
 
 const STATIC_ASSETS = {
-  '/app.js': ['app.js', 'application/javascript; charset=utf-8'],
-  '/format.js': ['format.js', 'application/javascript; charset=utf-8'],
-  '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
-  '/scrollbars.css': ['scrollbars.css', 'text/css; charset=utf-8'],
+  '/app.js': ['app.js', 'application/javascript'],
+  '/format.js': ['format.js', 'application/javascript'],
+  '/styles.css': ['styles.css', 'text/css'],
+  '/scrollbars.css': ['scrollbars.css', 'text/css'],
 };
 
 for (const [route, [file, contentType]] of Object.entries(STATIC_ASSETS)) {

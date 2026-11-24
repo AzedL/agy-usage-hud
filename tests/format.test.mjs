@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
-import {
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const formatSource = readFileSync(
+  join(__dirname, '..', 'sidecars', 'usage_hud', 'web', 'format.js'),
+  'utf-8',
+);
+const sandbox = { globalThis: {} };
+sandbox.globalThis = sandbox;
+vm.runInNewContext(formatSource, sandbox);
+
+const {
   ageClass,
   clock,
   contrast,
@@ -15,7 +29,7 @@ import {
   tok,
   tps,
   usageText,
-} from '../sidecars/usage_hud/web/format.js';
+} = sandbox.UsageHudFormat;
 
 describe('frontend formatting helpers', () => {
   it('formats token counts cleanly across unit boundaries', () => {
@@ -78,7 +92,7 @@ describe('frontend formatting helpers', () => {
   it('parses rgb/rgba and computes WCAG luminance and contrast', () => {
     const black = parseRgb('rgb(0, 0, 0)');
     const white = parseRgb('rgba(255, 255, 255, 1)');
-    assert.deepEqual(black, { r: 0, g: 0, b: 0, a: 1 });
+    assert.deepEqual({ ...black }, { r: 0, g: 0, b: 0, a: 1 });
     assert.equal(luminance(black), 0);
     assert.equal(luminance(white), 1);
     assert.equal(contrast(white, black), 21);

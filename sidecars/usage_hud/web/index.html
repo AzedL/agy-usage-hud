@@ -15,7 +15,11 @@
   // than hanging on "Loading…" indefinitely. Uses ES5 syntax intentionally.
   window.__usageBootErrors = [];
   window.addEventListener('error', function (e) {
-    var msg = (e && (e.message || (e.error && e.error.message))) || 'failed to load script';
+    var target = e && e.target;
+    var res = target && (target.src || target.href);
+    var msg =
+      (e && (e.message || (e.error && e.error.message))) ||
+      (res ? 'failed to load ' + res : 'failed to load script');
     window.__usageBootErrors.push(String(msg));
   }, true);
   window.addEventListener('unhandledrejection', function (e) {
@@ -40,6 +44,7 @@
 <div id="scroller" class="ag-scroll">
   <div id="root"><div class="boot">Loading…</div></div>
 </div>
-<script type="module" src="/app.js"></script>
+<script src="/format.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>
