@@ -1,0 +1,12 @@
+{
+  "name": "agy-usage-hud",
+  "displayName": "Usage HUD",
+  "description": "Read-only side panel for Antigravity showing per-conversation turns, steps, token usage, cache hit rate, streaming throughput, and context window fullness.",
+  "logo": "assets/logo.svg",
+  "version": "0.1.0",
+  "suggestedPrompts": [
+    "Show this conversation's token usage and cache hit rate",
+    "Which turns lost the most cache?",
+    "How full is the context window?"
+  ]
+}

@@ -1,0 +1,193 @@
+/*
+ * Usage HUD.
+ *
+ * Colours come from the host, which pushes --background, --foreground,
+ * --muted-foreground, --card, --card-border, ... into this iframe; preload.js
+ * writes them onto documentElement. Measured in the real pane:
+ *   --background #070708  --foreground #FFFFFF  --muted-foreground #87888F
+ *   --card #131317        --card-border rgb(255 255 255 / 0.08)
+ * The fallbacks are those same values, so a pane that misses the push still
+ * matches the app.
+ */
+:root {
+  color-scheme: dark;
+
+  --background: #070708;
+  --foreground: #ffffff;
+  --muted-foreground: #87888f;
+  --card: #131317;
+  --card-border: rgba(255, 255, 255, 0.08);
+  --primary: #2f71e3;
+  --error: #de5555;
+  --warning: #e8975f;
+  --success: #7aae66;
+  --editor-font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  /* Horizontal inset of text inside any background block. */
+  --gutter: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font: 12.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#scroller {
+  /* The pane is exactly the iframe box; #scroller must fill it, or the scroll
+     container collapses to its content height and never scrolls. The right
+     padding plus the reserved scrollbar gutter is the 18px the text sits
+     inside the pane, whether or not a scrollbar is showing. */
+  height: 100%;
+  padding: 12px 8px 20px 14px;
+}
+
+.boot { color: var(--muted-foreground); padding: 12px 2px; }
+.num { font-family: var(--editor-font-family); font-variant-numeric: tabular-nums; }
+
+/* Age of a wait: green under a minute, amber under five, red beyond. */
+.t.good { color: var(--success); }
+.t.mid { color: var(--warning); }
+.t.bad { color: var(--error); }
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+.head .title { font-weight: 600; flex: none; }
+.head .model {
+  font-family: var(--editor-font-family);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  text-align: right;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 9px var(--gutter);
+  margin-bottom: 12px;
+}
+
+.l1 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 18px;
+}
+@media (max-width: 430px) {
+  .l1 { grid-template-columns: minmax(0, 1fr); }
+}
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.metric .k { color: var(--muted-foreground); font-size: 11.5px; white-space: nowrap; flex: none; }
+.metric .v {
+  font-family: var(--editor-font-family);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--foreground) 14%, transparent);
+  overflow: hidden;
+  margin-top: 5px;
+}
+.bar > i { position: absolute; inset: 0 auto 0 0; background: var(--primary); }
+.bar.warn > i { background: var(--warning); }
+.bar.bad > i { background: var(--error); }
+
+.section-title {
+  margin: 16px 0 6px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* A row is the label, the content, then the hit rate in its own right-hand
+   column. The side padding is the card's, so the text sits as far inside the
+   row's hover background as the card's text sits inside the card. */
+.row {
+  display: grid;
+  /* Fixed label column: every row's content starts on one x, and the gap after
+     the number is the gutter itself. 3ch fits the widest label (#92). */
+  grid-template-columns: 3ch minmax(0, 1fr) max-content;
+  gap: var(--gutter);
+  align-items: baseline;
+  padding: 6px var(--gutter);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.row:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+.row .lbl {
+  font-family: var(--editor-font-family);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  text-align: left;
+}
+.row .mid { min-width: 0; }
+.row .line1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.row .line1 .model {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row .line1 .num, .row .line1 .t { flex: none; }
+/* The detail line wraps rather than being clipped: the pane is narrow, and a
+   lost hit rate is worse than a second line. */
+.row .line2 {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-family: var(--editor-font-family);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.row .hit {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* The container carries the indent, not the row: a step keeps the same left
+   padding as a turn, and the border is what shows it belongs to one. */
+.steps { margin: 2px 0 8px 14px; border-left: 1px solid var(--card-border); padding-left: 8px; }
+.steps .row { padding: 4px var(--gutter); }
+
+.hit { font-family: var(--editor-font-family); font-variant-numeric: tabular-nums; }
+.hit.good { color: var(--success); }
+.hit.mid { color: var(--warning); }
+.hit.bad { color: var(--error); }
+
+.empty { color: var(--muted-foreground); padding: 16px 4px; }

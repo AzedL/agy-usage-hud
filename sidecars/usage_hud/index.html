@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Host bridge: exposes window.sidecar (token, conversationId) and keeps the
+     host theme tokens (--background, --foreground, --card, ...) on :root. -->
+<script src="/preload.js"></script>
+<title>Usage</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/scrollbars.css">
+<script>
+  // Watchdog: if app.js never takes over, say why instead of showing
+  // "Loading…" forever. A syntax error in a future build is otherwise
+  // indistinguishable from a slow first paint.
+  window.__usageBootErrors = [];
+  window.addEventListener('error', function (e) {
+    window.__usageBootErrors.push(String(e.message || e.error || 'unknown error'));
+  });
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      var root = document.getElementById('root');
+      if (!root || !root.querySelector('.boot')) return;
+      var why = window.__usageBootErrors[0] || 'app.js did not start';
+      root.innerHTML = '';
+      var box = document.createElement('div');
+      box.className = 'empty';
+      box.textContent = 'Failed to start: ' + why;
+      root.appendChild(box);
+    }, 4000);
+  });
+</script>
+</head>
+<body>
+<div id="scroller" class="ag-scroll">
+  <div id="root"><div class="boot">Loading…</div></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
