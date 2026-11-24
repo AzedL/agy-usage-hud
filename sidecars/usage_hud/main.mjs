@@ -20,7 +20,7 @@ import {
   loadMetricsData,
   readSteps,
 } from './lib/sources.mjs';
-import { buildSnapshot, hasTokens, isPlanner } from './lib/usage.mjs';
+import { buildSnapshot, hasUnmatchedPlannerSteps } from './lib/usage.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = join(__dirname, 'web');
@@ -91,9 +91,8 @@ async function computeSnapshot(conv, activeConversationId) {
     return { conversationId: conv, build, error: 'no-transcript' };
   }
 
-  const expectedSteps = steps.filter((d) => isPlanner(d) && hasTokens(d)).length;
   const { meta, timings, fallbackTimings } = await loadMetricsData(appData, conv, {
-    expectedSteps,
+    needsFallback: (lsTimings) => hasUnmatchedPlannerSteps(steps, lsTimings),
   });
   const payload = buildSnapshot({ conv, build, steps, timings, fallbackTimings, meta });
   snapshotCache.set(conv, sig, payload, { hasLs });

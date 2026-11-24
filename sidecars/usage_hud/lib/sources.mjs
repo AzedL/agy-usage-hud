@@ -442,17 +442,21 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
 /**
  * Loads timing and context metadata for `conv`.
  * Runs the language server RPC in parallel with `gen_metadata` when LS env vars
- * are present. If LS is unavailable OR returns fewer timings than `expectedSteps`,
- * also loads fallback `steps` timings from SQLite so unmatched calls can fall
- * back individually without losing LS timings on matched calls.
+ * are present. If LS is unavailable OR `needsFallback(fromLs)` returns true
+ * (indicating at least one planner step failed to match LS), also loads
+ * fallback `steps` timings from SQLite so unmatched calls can fall back
+ * individually without losing LS timings on matched calls.
  *
  * @param {string} appData
  * @param {string} conv
- * @param {{ env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch, expectedSteps?: number }} [options]
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   fetchImpl?: typeof fetch,
+ *   needsFallback?: (lsTimings: object) => boolean,
+ * }} [options]
  */
 export async function loadMetricsData(appData, conv, options = {}) {
   const env = options.env ?? process.env;
-  const expectedSteps = options.expectedSteps ?? 0;
   const hasLs = Boolean(env.ANTIGRAVITY_LS_ADDRESS && env.ANTIGRAVITY_CSRF_TOKEN);
 
   if (!hasLs) {
@@ -465,7 +469,10 @@ export async function loadMetricsData(appData, conv, options = {}) {
     loadDbData(appData, conv, { includeStepTimings: false }),
   ]);
 
-  if (fromLs && (expectedSteps <= 0 || fromLs.count >= expectedSteps)) {
+  const shouldLoadFallback =
+    !fromLs || (typeof options.needsFallback === 'function' && options.needsFallback(fromLs));
+
+  if (!shouldLoadFallback) {
     return { meta: dbInitial.meta, timings: fromLs, fallbackTimings: null };
   }
 

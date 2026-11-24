@@ -65,6 +65,9 @@ function waitSpan(ms, basis) {
 
 function contextTooltip(reason) {
   if (reason === 'fallback') return 'Estimated context window (fallback 512k)';
+  if (reason === 'latest-step-unmetered') {
+    return 'Estimated context window (latest call has no token usage; numerator is from an earlier call)';
+  }
   if (reason === 'latest-row-missing-window') {
     return 'Estimated context window (latest metadata row has no window size)';
   }
@@ -72,6 +75,22 @@ function contextTooltip(reason) {
     return 'Estimated context window (metadata lags behind recent model switch)';
   }
   return '';
+}
+
+function tpsTooltip(source, timedSteps, meteredSteps) {
+  const sample =
+    typeof timedSteps === 'number' && typeof meteredSteps === 'number' && meteredSteps > 0
+      ? `Based on ${timedSteps} of ${meteredSteps} metered calls`
+      : '';
+  if (source === 'steps') {
+    return sample
+      ? `Estimated rate from SQLite timestamps (includes TTFT) — ${sample}`
+      : 'Estimated rate from SQLite timestamps (includes TTFT)';
+  }
+  if (source === 'generator' && sample) {
+    return `Streaming rate — ${sample}`;
+  }
+  return sample;
 }
 
 function renderHead(data) {
@@ -90,15 +109,15 @@ function renderSummary(data) {
   grid.append(metric('steps', fmt(s.steps)));
 
   if (data.hasUsage) {
-    const coarseTps = s.tps !== null && s.tps !== undefined && s.tpsSource === 'steps';
+    const hasTps = s.tps !== null && s.tps !== undefined;
+    const coarseTps = hasTps && s.tpsSource === 'steps';
     const tpsNode = metric(
       'tps',
-      s.tps === null || s.tps === undefined
-        ? '\u2014'
-        : (coarseTps ? '~' : '') + tps(s.tps) + ' tok/s',
+      hasTps ? (coarseTps ? '~' : '') + tps(s.tps) + ' tok/s' : '\u2014',
     );
-    if (coarseTps) {
-      tpsNode.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+    if (hasTps) {
+      const tip = tpsTooltip(s.tpsSource, s.timedSteps, s.meteredSteps);
+      if (tip) tpsNode.title = tip;
     }
     grid.append(metric('input', tok(s.input)));
     grid.append(metric('cache', tok(s.cache)));
@@ -193,12 +212,14 @@ function renderTurn(turn, open) {
   if (turn.gapBeforeMs !== null) line.append(waitSpan(turn.gapBeforeMs, turn.gapBeforeBasis));
   mid.append(line);
 
-  const coarseTurnRate = turn.tps !== null && turn.tps !== undefined && turn.tpsSource === 'steps';
+  const hasTurnTps = turn.tps !== null && turn.tps !== undefined;
+  const coarseTurnRate = hasTurnTps && turn.tpsSource === 'steps';
   const detail = turn.hasUsage
     ? usageLine(usageText(turn.input, turn.cache, turn.output, turn.tps, { estimatedRate: coarseTurnRate }))
     : usageLine('no usage');
-  if (coarseTurnRate) {
-    detail.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+  if (hasTurnTps) {
+    const tip = tpsTooltip(turn.tpsSource, turn.timedSteps, turn.meteredSteps);
+    if (tip) detail.title = tip;
   }
   mid.append(detail);
   row.append(mid, hitCell(turn.hasUsage ? turn.hitRate : null));

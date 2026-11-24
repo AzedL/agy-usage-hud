@@ -241,10 +241,19 @@ describe('filesystem discovery and SQLite integration', () => {
       const partialMetrics = await loadMetricsData(tmp, conv, {
         env: { ANTIGRAVITY_LS_ADDRESS: 'localhost:5387', ANTIGRAVITY_CSRF_TOKEN: 'tok' },
         fetchImpl: partialLsFetch,
-        expectedSteps: 2,
+        needsFallback: () => true,
       });
       assert.equal(partialMetrics.timings.source, 'generator');
       assert.equal(partialMetrics.fallbackTimings.source, 'steps');
+
+      // When needsFallback returns false (all steps matched LS), SQLite steps is skipped
+      const completeMetrics = await loadMetricsData(tmp, conv, {
+        env: { ANTIGRAVITY_LS_ADDRESS: 'localhost:5387', ANTIGRAVITY_CSRF_TOKEN: 'tok' },
+        fetchImpl: partialLsFetch,
+        needsFallback: () => false,
+      });
+      assert.equal(completeMetrics.timings.source, 'generator');
+      assert.equal(completeMetrics.fallbackTimings, null);
 
       // Adding a final gen_metadata row without max_context_tokens flips lastRowHasMax to false
       const db2 = new DatabaseSync(dbPath);

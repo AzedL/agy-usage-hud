@@ -6,6 +6,7 @@ import {
   buildTurns,
   effectiveStreamedOutput,
   FALLBACK_CONTEXT_WINDOW,
+  hasUnmatchedPlannerSteps,
   MIN_RATE_STREAM_MS,
 } from '../sidecars/usage_hud/lib/usage.mjs';
 
@@ -426,14 +427,155 @@ describe('turn grouping and aggregation', () => {
     // Turn 1 & conversation TPS MUST NOT dilute 200 tok/s with SQLite's coarse 20 tok/s
     assert.equal(snap.turns[0].tps, 200);
     assert.equal(snap.turns[0].tpsSource, 'generator');
+    assert.equal(snap.turns[0].timedSteps, 1);
     assert.equal(snap.summary.tps, 200);
     assert.equal(snap.summary.tpsSource, 'generator');
+    assert.equal(snap.summary.timedSteps, 1);
     assert.equal(snap.summary.timingSource, 'mixed');
     // Turn 2 has only SQLite steps, so its TPS uses SQLite with tpsSource: 'steps'
     assert.equal(snap.turns[1].tps, 50);
     assert.equal(snap.turns[1].tpsSource, 'steps');
+    assert.equal(snap.turns[1].timedSteps, 1);
     // Cache completeness still sees only 1/3 generator-matched steps
     assert.equal(snap.summary.generatorMatchedSteps, 1);
     assert.equal(snap.summary.stepsMatchedSteps, 2);
+  });
+
+  it('reserves lower-priority SQLite entries for steps already matched by LS in the same second', () => {
+    const ts = '2026-11-24T10:00:10Z';
+    const sec = Math.floor(Date.parse(ts) / 1000);
+    const steps = [
+      { step_index: 9, type: 'USER_INPUT', created_at: '2026-11-24T10:00:09Z' },
+      {
+        step_index: 10,
+        type: 'PLANNER_RESPONSE',
+        created_at: ts,
+        model: 'flash',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 200,
+      },
+      {
+        step_index: 11,
+        type: 'PLANNER_RESPONSE',
+        created_at: ts,
+        model: 'flash',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 200,
+      },
+    ];
+
+    const lsTimingA = {
+      streamMs: 1000,
+      ttftMs: 100,
+      response: 200,
+      thinking: 0,
+      hasSplit: true,
+      source: 'generator',
+    };
+    const sqliteTimingB = {
+      streamMs: 2000,
+      ttftMs: null,
+      response: 200,
+      thinking: 0,
+      hasSplit: true,
+      source: 'steps',
+    };
+
+    const lsTimings = {
+      byStepIndex: new Map([[10, lsTimingA]]),
+      bySecond: new Map([[sec, [lsTimingA]]]),
+    };
+    const sqliteTimings = {
+      byStepIndex: new Map([[10, sqliteTimingB]]),
+      bySecond: new Map([[sec, [sqliteTimingB]]]),
+    };
+
+    const snap = buildSnapshot({
+      conv: 'aaaa1111',
+      build: '1',
+      steps,
+      timings: lsTimings,
+      fallbackTimings: sqliteTimings,
+      meta: null,
+    });
+
+    assert.equal(snap.turns[0].steps[0].timingSource, 'generator');
+    assert.equal(snap.turns[0].steps[0].rate, 200);
+    // Step 11 has no timing in either source and must NOT steal Step 10's SQLite entry via bySecond
+    assert.equal(snap.turns[0].steps[1].timingSource, null);
+    assert.equal(snap.turns[0].steps[1].rate, null);
+  });
+
+  it('detects unmatched planner steps even when LS timing count equals metered step count', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', created_at: '2026-11-24T10:00:01Z', input_tokens: 100 },
+      { step_index: 2, type: 'PLANNER_RESPONSE', created_at: '2026-11-24T10:00:05Z', input_tokens: 100 },
+      { step_index: 3, type: 'PLANNER_RESPONSE', created_at: '2026-11-24T10:00:10Z' }, // unmetered
+    ];
+
+    const t1 = { streamMs: 500, ttftMs: 100, response: 50, thinking: 0, hasSplit: true, source: 'generator' };
+    const t3 = { streamMs: 500, ttftMs: 100, response: 50, thinking: 0, hasSplit: true, source: 'generator' };
+    const partialLs = {
+      byStepIndex: new Map([
+        [1, t1],
+        [3, t3],
+      ]),
+      bySecond: new Map(),
+      count: 2, // equals metered count (2), yet step 2 is unmatched
+    };
+    assert.equal(hasUnmatchedPlannerSteps(steps, partialLs), true);
+
+    const t2 = { streamMs: 500, ttftMs: 100, response: 50, thinking: 0, hasSplit: true, source: 'generator' };
+    const fullLs = {
+      byStepIndex: new Map([
+        [1, t1],
+        [2, t2],
+        [3, t3],
+      ]),
+      bySecond: new Map(),
+      count: 3,
+    };
+    assert.equal(hasUnmatchedPlannerSteps(steps, fullLs), false);
+  });
+
+  it('marks context window unaligned when the latest planner step is unmetered', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:01Z',
+        model: 'model-a',
+        input_tokens: 1000,
+        cache_read_tokens: 399_000,
+        output_tokens: 100,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:05Z',
+        model: 'model-b',
+        // no input_tokens (unmetered)
+      },
+    ];
+
+    const fullMeta = {
+      maxContextTokens: 512_000,
+      maxContextTokensSeen: [512_000, 1_000_000],
+      estimatedTokensUsed: 400_000,
+      rows: 2,
+      validRows: 2,
+      lastRowHasMax: true,
+      source: 'gen_metadata',
+    };
+
+    const snap = buildSnapshot({ conv: 'aaaa1111', build: '1', steps, timings: null, meta: fullMeta });
+    assert.equal(snap.summary.contextUsed, 400_000);
+    assert.equal(snap.summary.contextMax, 512_000);
+    assert.equal(snap.summary.contextWindowAligned, false);
+    assert.equal(snap.context.alignmentReason, 'latest-step-unmetered');
   });
 });

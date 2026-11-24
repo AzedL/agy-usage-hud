@@ -104,13 +104,17 @@ function allocateFromSource(plannerSteps, source, assigned) {
   const consumed = new Set();
 
   // Pass 1: exact step_index matches.
+  // Even if a step already received a higher-priority timing, reserve its own
+  // entry in this lower-priority source so another step in the same second
+  // cannot claim it during Pass 2.
   if (source.byStepIndex instanceof Map) {
     for (const d of plannerSteps) {
-      if (assigned.has(d) || typeof d.step_index !== 'number') continue;
+      if (typeof d.step_index !== 'number') continue;
       const entry = source.byStepIndex.get(d.step_index);
-      if (entry && !consumed.has(entry)) {
+      if (!entry || consumed.has(entry)) continue;
+      consumed.add(entry);
+      if (!assigned.has(d)) {
         assigned.set(d, entry);
-        consumed.add(entry);
       }
     }
   }
@@ -130,6 +134,23 @@ function allocateFromSource(plannerSteps, source, assigned) {
       }
     }
   }
+}
+
+/**
+ * Returns true if any planner step in `steps` fails to match an entry in
+ * `timings` (using the exact same allocation rules as `aggregateTurns`).
+ *
+ * @param {Array<Record<string, unknown>>} steps
+ * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
+ * @returns {boolean}
+ */
+export function hasUnmatchedPlannerSteps(steps, timings) {
+  const plannerSteps = steps.filter(isPlanner);
+  if (!plannerSteps.length) return false;
+  if (!timings) return true;
+  const assigned = new Map();
+  allocateFromSource(plannerSteps, timings, assigned);
+  return assigned.size < plannerSteps.length;
 }
 
 /**
@@ -212,8 +233,10 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
     let lastPlannerBasis = null;
     let genStreamMs = 0;
     let genStreamedOutput = 0;
+    let genTimedSteps = 0;
     let stepsStreamMs = 0;
     let stepsStreamedOutput = 0;
+    let stepsTimedSteps = 0;
     let turnThinking = 0;
 
     for (const d of t.steps) {
@@ -236,9 +259,11 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
         if (timing.source === 'generator') {
           genStreamMs += timing.streamMs;
           genStreamedOutput += streamedOutput;
+          genTimedSteps += 1;
         } else {
           stepsStreamMs += timing.streamMs;
           stepsStreamedOutput += streamedOutput;
+          stepsTimedSteps += 1;
         }
       }
       if (timing && typeof timing.thinking === 'number' && timing.thinking > 0) {
@@ -299,6 +324,7 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
     const useGenTps = genStreamMs > 0;
     const turnStreamMs = useGenTps ? genStreamMs : stepsStreamMs;
     const turnStreamedOutput = useGenTps ? genStreamedOutput : stepsStreamedOutput;
+    const turnTimedSteps = useGenTps ? genTimedSteps : stepsTimedSteps;
     const turnTps = rateOf(turnStreamedOutput, turnStreamMs);
     const tpsSource = turnTps !== null ? (useGenTps ? 'generator' : 'steps') : null;
 
@@ -311,6 +337,7 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
       durationMs,
       streamMs: turnStreamMs > 0 ? turnStreamMs : null,
       streamedOutput: turnStreamedOutput,
+      timedSteps: turnTimedSteps,
       tps: turnTps,
       tpsSource,
       thinking: turnThinking,
@@ -419,10 +446,13 @@ export function summarizeConversation(turns) {
 
 /**
  * Evaluates whether the context window denominator from `gen_metadata` can be
- * treated as aligned with the latest model call.
+ * treated as aligned with the specific call supplying `contextUsed`.
  */
-function assessContextAlignment(meta, summary, distinctModels) {
+function assessContextAlignment(meta, summary, distinctModels, lastMeteredStep, lastPlannerStep) {
   if (!meta) return { aligned: false, reason: 'fallback' };
+  if (lastMeteredStep && lastPlannerStep && lastMeteredStep !== lastPlannerStep) {
+    return { aligned: false, reason: 'latest-step-unmetered' };
+  }
   if (meta.lastRowHasMax === false) {
     return { aligned: false, reason: 'latest-row-missing-window' };
   }
@@ -453,6 +483,7 @@ export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = n
   const turns = aggregateTurns(buildTurns(steps), timings, fallbackTimings);
   const summary = summarizeConversation(turns);
 
+  let lastPlannerStep = null;
   let lastMeteredStep = null;
   let lastModel = null;
   const distinctModels = new Set();
@@ -461,6 +492,7 @@ export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = n
     const turnSteps = turns[ti].steps;
     for (let si = turnSteps.length - 1; si >= 0; si -= 1) {
       const s = turnSteps[si];
+      if (!lastPlannerStep) lastPlannerStep = s;
       if (s.model) {
         distinctModels.add(s.model);
         if (!lastModel) lastModel = s.model;
@@ -473,7 +505,13 @@ export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = n
     ? lastMeteredStep.prompt
     : (meta?.estimatedTokensUsed ?? null);
   const contextMax = meta?.maxContextTokens ?? FALLBACK_CONTEXT_WINDOW;
-  const alignment = assessContextAlignment(meta, summary, distinctModels);
+  const alignment = assessContextAlignment(
+    meta,
+    summary,
+    distinctModels,
+    lastMeteredStep,
+    lastPlannerStep,
+  );
 
   return {
     conversationId: conv,
