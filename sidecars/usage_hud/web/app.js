@@ -1,57 +1,29 @@
 /**
- * Usage HUD front end: L1 conversation, L2 turns, L3 steps.
+ * Usage HUD frontend: L1 conversation summary, L2 turns, L3 model calls.
  *
- * Every level is a block of numbers laid out in reading order. The only
- * coloured text is the wait duration, which is coloured by its own length.
+ * Semantic colour is reserved for two signals: wait duration (green/amber/red
+ * by age) and cache hit rate (green/amber/red by ratio).
  */
+import {
+  ageClass,
+  clock,
+  contrast,
+  dur,
+  fmt,
+  hitClass,
+  luminance,
+  parseRgb,
+  pct,
+  stepCountLabel,
+  stepRate,
+  tok,
+  tps,
+  usageText,
+} from './format.js';
+
 const root = document.getElementById('root');
+const scroller = document.getElementById('scroller');
 const POLL_MS = 3000;
-
-function fmt(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return '\u2014';
-  return Math.round(n).toLocaleString('en-US');
-}
-
-function tok(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return '\u2014';
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-  if (n >= 1e4) return (n / 1e3).toFixed(1) + 'k';
-  return String(Math.round(n));
-}
-
-function pct(x) {
-  if (x === null || x === undefined || Number.isNaN(x)) return '\u2014';
-  return (x * 100).toFixed(1) + '%';
-}
-
-function tps(x) {
-  if (x === null || x === undefined || Number.isNaN(x)) return '\u2014';
-  return x >= 100 ? x.toFixed(0) : x.toFixed(1);
-}
-
-/** Compact duration: 43s, 7.0m, 1.1h. */
-function dur(ms) {
-  if (ms === null || ms === undefined) return '\u2014';
-  const s = ms / 1000;
-  if (s < 1) return '<1s';
-  if (s < 60) return s.toFixed(0) + 's';
-  if (s < 3600) return (s / 60).toFixed(1) + 'm';
-  return (s / 3600).toFixed(1) + 'h';
-}
-
-/** A wait is green under a minute, amber under five, red beyond. */
-function ageClass(ms) {
-  if (ms === null || ms === undefined) return '';
-  if (ms < 60000) return 'good';
-  if (ms < 300000) return 'mid';
-  return 'bad';
-}
-
-function clock(at) {
-  if (!at) return '--:--';
-  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
 
 function el(tag, className, text) {
   const n = document.createElement(tag);
@@ -77,23 +49,10 @@ function contextBar(used, max) {
   return bar;
 }
 
-/** The wait since the previous model call, coloured by its own length. */
+/** Wait since the previous model call, coloured by its duration. */
 function waitSpan(ms) {
   return el('span', 't ' + ageClass(ms), '+' + dur(ms));
 }
-
-/** "in 2382 \u00b7 cache 407.0k \u00b7 out 1055 \u00b7 210.4 tok/s" */
-function usageText(input, cache, output, rate) {
-  return 'in ' + tok(input) + ' \u00b7 cache ' + tok(cache) + ' \u00b7 out ' + tok(output) +
-    (rate === null || rate === undefined ? '' : ' \u00b7 ' + tps(rate) + ' tok/s');
-}
-
-/**
- * A generation shorter than this cannot be told apart from the first-token
- * wait: five tokens in 30ms says nothing about sustained speed. Such a step
- * still shows its tokens, but no rate.
- */
-const MIN_RATE_STREAM_MS = 200;
 
 function renderHead(data) {
   const head = el('div', 'head');
@@ -114,14 +73,14 @@ function renderSummary(data) {
     grid.append(metric('input', tok(s.input)));
     grid.append(metric('cache', tok(s.cache)));
     grid.append(metric('output', tok(s.output)));
-    grid.append(metric('tps', tps(s.tps) + ' tok/s'));
+    grid.append(metric('tps', s.tps === null || s.tps === undefined ? '\u2014' : tps(s.tps) + ' tok/s'));
     grid.append(metric('total', tok(s.total)));
     grid.append(metric('hit', pct(s.hitRate)));
   }
   card.append(grid);
 
   if (!data.hasUsage) {
-    const note = el('div', 'line2 dim', 'This conversation records no token usage.');
+    const note = el('div', 'card-note', 'This conversation records no token usage.');
     note.style.marginTop = '6px';
     card.append(note);
   }
@@ -129,26 +88,26 @@ function renderSummary(data) {
   const ctx = el('div', 'metric');
   ctx.style.marginTop = '8px';
   ctx.append(el('span', 'k', 'context'));
-  ctx.append(el('span', 'v',
-    (s.contextUsed === null ? '\u2014' : tok(s.contextUsed)) + ' / ' + tok(s.contextMax) +
-    (s.contextRatio === null ? '' : '  ' + pct(s.contextRatio))));
+  ctx.append(
+    el(
+      'span',
+      'v',
+      (s.contextUsed === null ? '\u2014' : tok(s.contextUsed)) +
+        ' / ' +
+        tok(s.contextMax) +
+        (s.contextRatio === null ? '' : '  ' + pct(s.contextRatio)),
+    ),
+  );
   card.append(ctx);
 
   if (s.contextUsed !== null) card.append(contextBar(s.contextUsed, s.contextMax));
 
   if (s.contextSource !== 'gen_metadata') {
-    const note = el('div', 'line2 dim', 'window: fallback ' + tok(s.contextMax));
+    const note = el('div', 'card-note', 'window: fallback ' + tok(s.contextMax));
     note.style.marginTop = '4px';
     card.append(note);
   }
   return card;
-}
-
-function hitClass(rate) {
-  if (rate === null || rate === undefined) return '';
-  if (rate >= 0.8) return 'good';
-  if (rate >= 0.5) return 'mid';
-  return 'bad';
 }
 
 /** Second line of a row: what the call cost, in tokens and throughput. */
@@ -156,16 +115,10 @@ function usageLine(text) {
   return el('div', 'line2', text);
 }
 
-/** The cache hit rate: its own column, on the right. */
+/** Cache hit rate: its own right-aligned column. */
 function hitCell(rate) {
-  return el('span', 'hit ' + hitClass(rate), rate === null ? '\u2014' : pct(rate));
-}
-
-/** The model's streaming rate; null when the window is too short to mean anything. */
-function stepRate(st) {
-  if (st.rate === null || st.rate === undefined) return null;
-  if (st.streamMs !== null && st.streamMs !== undefined && st.streamMs < MIN_RATE_STREAM_MS) return null;
-  return st.rate;
+  const hasRate = rate !== null && rate !== undefined && !Number.isNaN(rate);
+  return el('span', 'hit ' + hitClass(rate), hasRate ? pct(rate) : '\u2014');
 }
 
 /** "#24 gemini-4-neon-high 409.4k +43s" */
@@ -183,9 +136,11 @@ function renderSteps(turn) {
     if (st.gapMs !== null) line.append(waitSpan(st.gapMs));
     mid.append(line);
 
-    mid.append(st.metered
-      ? usageLine(usageText(st.input, st.cache, st.output, stepRate(st)))
-      : usageLine('no usage'));
+    mid.append(
+      st.metered
+        ? usageLine(usageText(st.input, st.cache, st.output, stepRate(st)))
+        : usageLine('no usage'),
+    );
     row.append(mid, hitCell(st.hitRate));
     box.append(row);
   }
@@ -200,23 +155,33 @@ function renderTurn(turn, open) {
   const mid = el('div', 'mid');
   const line = el('div', 'line1');
   line.append(el('span', 'num', clock(turn.start)));
-  line.append(el('span', 'num', turn.stepCount + 'steps'));
+  line.append(el('span', 'num', stepCountLabel(turn.stepCount)));
   // The first turn of the conversation has nothing before it.
   if (turn.gapBeforeMs !== null) line.append(waitSpan(turn.gapBeforeMs));
   mid.append(line);
 
-  mid.append(turn.hasUsage
-    ? usageLine(usageText(turn.input, turn.cache, turn.output, turn.tps))
-    : usageLine('no usage'));
+  mid.append(
+    turn.hasUsage
+      ? usageLine(usageText(turn.input, turn.cache, turn.output, turn.tps))
+      : usageLine('no usage'),
+  );
   row.append(mid, hitCell(turn.hasUsage ? turn.hitRate : null));
 
   if (!turn.steps.length) return [row];
 
-  row.addEventListener('click', () => {
+  const toggle = () => {
     expanded.set(turn.index, !open);
     render(state);
+  };
+  row.addEventListener('click', toggle);
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
   });
   row.setAttribute('role', 'button');
+  row.setAttribute('tabindex', '0');
   row.setAttribute('aria-expanded', String(open));
 
   return open ? [row, renderSteps(turn)] : [row];
@@ -249,30 +214,45 @@ function render(data) {
   title.append(el('span', null, 'turns'), el('span', null, data.summary.turns + ' total'));
   root.append(title);
 
-  const ordered = [...data.turns].reverse();
-  ordered.forEach((t, i) => {
-    if (t.implicit && !t.steps.length) return;
-    // The turn being watched is the newest one, so it starts open.
+  const visible = [...data.turns]
+    .reverse()
+    .filter((t) => !(t.implicit && !t.steps.length));
+
+  visible.forEach((t, i) => {
+    // The newest turn starts open so the user sees live steps immediately.
     const open = expanded.has(t.index) ? expanded.get(t.index) : i === 0;
     for (const node of renderTurn(t, open)) root.append(node);
   });
 
-  if (!data.turns.length) root.append(el('div', 'empty', 'No turns recorded.'));
+  if (!visible.length) root.append(el('div', 'empty', 'No turns recorded.'));
 }
 
 // ---------------------------------------------------------------------------
+// Polling & live updates
+// ---------------------------------------------------------------------------
 
-/** Open/closed state of a turn, set only by clicking it. */
+/** Open/closed state of a turn, set only by user interaction. */
 const expanded = new Map();
 let state = { conversationId: null, turns: [] };
+let lastStateJson = '';
 let loadedBuild = null;
+let pollTimer = null;
+let pollInFlight = false;
 
 function usageUrl() {
   const conv = window.sidecar?.conversationId || '';
   return conv ? '/api/usage?conversationId=' + encodeURIComponent(conv) : '/api/usage';
 }
 
+function schedulePoll(delayMs = POLL_MS) {
+  clearTimeout(pollTimer);
+  if (document.hidden) return;
+  pollTimer = setTimeout(poll, delayMs);
+}
+
 async function poll() {
+  if (pollInFlight || document.hidden) return;
+  pollInFlight = true;
   try {
     const url = usageUrl();
     const res = window.sidecar?.fetch
@@ -280,62 +260,61 @@ async function poll() {
       : await fetch(url);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const next = await res.json();
-    // A plugin update swaps the files under a running pane; pick it up rather
-    // than sitting on the build that happened to load first.
+
+    // A plugin update swaps files beneath a running pane; reload cleanly.
     if (next.build) {
       if (loadedBuild === null) loadedBuild = next.build;
-      else if (next.build !== loadedBuild) { location.reload(); return; }
+      else if (next.build !== loadedBuild) {
+        location.reload();
+        return;
+      }
     }
-    if (JSON.stringify(next) !== JSON.stringify(state)) {
+
+    const nextJson = JSON.stringify(next);
+    if (nextJson !== lastStateJson) {
+      if (next.conversationId !== state.conversationId) {
+        expanded.clear();
+        if (scroller) scroller.scrollTop = 0;
+      }
       state = next;
+      lastStateJson = nextJson;
       render(state);
     }
   } catch (err) {
-    if (!state.error) {
-      state = { ...state, error: 'internal', message: String(err?.message || err) };
+    const message = String(err?.message || err);
+    if (state.error !== 'internal' || state.message !== message) {
+      state = { ...state, error: 'internal', message };
+      lastStateJson = JSON.stringify(state);
       render(state);
     }
   } finally {
-    setTimeout(poll, POLL_MS);
+    pollInFlight = false;
+    schedulePoll(POLL_MS);
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  } else {
+    poll();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Theme synchronization & contrast repair
+// ---------------------------------------------------------------------------
 
 function applyTheme(vars) {
   if (!vars || typeof vars !== 'object') return;
   const target = document.documentElement;
   for (const [k, v] of Object.entries(vars)) {
-    if (typeof v === 'string' && v.trim()) target.style.setProperty(k, v);
+    if (k.startsWith('--') && typeof v === 'string' && v.trim()) {
+      target.style.setProperty(k, v);
+    }
   }
   scheduleContrastCheck();
-}
-
-/**
- * A host token can be missing or reference a variable that exists only in the
- * host document, in which case the property falls back to its initial value
- * and the pane goes unreadable. Text that cannot be read is worse than text
- * that ignores the theme, so measure and repair.
- */
-function parseRgb(value) {
-  const m = /rgba?\(([^)]+)\)/.exec(value || '');
-  if (!m) return null;
-  const parts = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
-  if (parts.length < 3 || parts.some(Number.isNaN)) return null;
-  return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
-}
-
-function luminance({ r, g, b }) {
-  const f = (c) => {
-    const v = c / 255;
-    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
-}
-
-function contrast(a, b) {
-  const l1 = luminance(a);
-  const l2 = luminance(b);
-  const [hi, lo] = l1 > l2 ? [l1, l2] : [l2, l1];
-  return (hi + 0.05) / (lo + 0.05);
 }
 
 function opaqueBackground(node) {
@@ -343,21 +322,37 @@ function opaqueBackground(node) {
     const c = parseRgb(getComputedStyle(n).backgroundColor);
     if (c && c.a >= 0.5) return c;
   }
-  return parseRgb(getComputedStyle(document.documentElement).backgroundColor)
-    || { r: 7, g: 7, b: 8, a: 1 };
+  return (
+    parseRgb(getComputedStyle(document.documentElement).backgroundColor) || {
+      r: 7,
+      g: 7,
+      b: 8,
+      a: 1,
+    }
+  );
 }
 
+/**
+ * Repairs unreadable foreground tokens if a host theme variable fails to
+ * resolve, and keeps `color-scheme` aligned with the active surface luminance.
+ */
 function ensureContrast() {
   const probe = document.querySelector('.head .title') || document.body;
   if (!probe) return;
   const bg = opaqueBackground(document.body);
+  const isDarkBg = luminance(bg) < 0.5;
+  document.documentElement.style.colorScheme = isDarkBg ? 'dark' : 'light';
+
   const fg = parseRgb(getComputedStyle(probe).color);
   if (!fg || contrast(fg, bg) < 4.5) {
-    const light = luminance(bg) < 0.5;
     document.documentElement.style.setProperty(
-      '--foreground', light ? 'rgb(232, 234, 237)' : 'rgb(29, 31, 33)');
+      '--foreground',
+      isDarkBg ? 'rgb(232, 234, 237)' : 'rgb(29, 31, 33)',
+    );
     document.documentElement.style.setProperty(
-      '--muted-foreground', light ? 'rgb(154, 160, 166)' : 'rgb(93, 103, 111)');
+      '--muted-foreground',
+      isDarkBg ? 'rgb(154, 160, 166)' : 'rgb(93, 103, 111)',
+    );
   }
 }
 
@@ -368,12 +363,13 @@ function scheduleContrastCheck() {
 }
 
 window.addEventListener('message', (event) => {
+  if (window.parent && window.parent !== window && event.source !== window.parent) return;
   if (event.data?.type !== 'theme-change') return;
   applyTheme(event.data.payload?.cssVariables);
 });
 
 window.addEventListener('load', () => setTimeout(ensureContrast, 120));
 
-// The pane owns its scrolling: #scroller is the only scroll container.
-render({ conversationId: null, turns: [] });
+// Initial paint & first poll.
+render(state);
 poll();

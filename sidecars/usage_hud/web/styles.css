@@ -1,16 +1,13 @@
 /*
- * Usage HUD.
+ * Usage HUD styles.
  *
  * Colours come from the host, which pushes --background, --foreground,
  * --muted-foreground, --card, --card-border, ... into this iframe; preload.js
- * writes them onto documentElement. Measured in the real pane:
- *   --background #070708  --foreground #FFFFFF  --muted-foreground #87888F
- *   --card #131317        --card-border rgb(255 255 255 / 0.08)
- * The fallbacks are those same values, so a pane that misses the push still
- * matches the app.
+ * writes them onto documentElement. Fallbacks match the default Antigravity
+ * dark palette so a standalone view renders cleanly too.
  */
 :root {
-  color-scheme: dark;
+  color-scheme: dark light;
 
   --background: #070708;
   --foreground: #ffffff;
@@ -42,8 +39,7 @@ html, body {
 #scroller {
   /* The pane is exactly the iframe box; #scroller must fill it, or the scroll
      container collapses to its content height and never scrolls. The right
-     padding plus the reserved scrollbar gutter is the 18px the text sits
-     inside the pane, whether or not a scrollbar is showing. */
+     padding plus the reserved scrollbar gutter equals the 18px inset. */
   height: 100%;
   padding: 12px 8px 20px 14px;
 }
@@ -81,6 +77,12 @@ html, body {
   border-radius: 8px;
   padding: 9px var(--gutter);
   margin-bottom: 12px;
+}
+
+.card-note {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-family: var(--editor-font-family);
 }
 
 .l1 {
@@ -134,20 +136,22 @@ html, body {
 }
 
 /* A row is the label, the content, then the hit rate in its own right-hand
-   column. The side padding is the card's, so the text sits as far inside the
-   row's hover background as the card's text sits inside the card. */
+   column. The side padding matches the card's gutter so text aligns cleanly. */
 .row {
   display: grid;
-  /* Fixed label column: every row's content starts on one x, and the gap after
-     the number is the gutter itself. 3ch fits the widest label (#92). */
-  grid-template-columns: 3ch minmax(0, 1fr) max-content;
+  /* Fixed label column: 4ch accommodates up to #999 without overflowing. */
+  grid-template-columns: 4ch minmax(0, 1fr) max-content;
   gap: var(--gutter);
   align-items: baseline;
   padding: 6px var(--gutter);
   border-radius: 6px;
-  cursor: pointer;
 }
-.row:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+.row[role="button"] { cursor: pointer; }
+.row[role="button"]:hover { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
+.row[role="button"]:focus-visible {
+  outline: 1.5px solid var(--primary);
+  outline-offset: -1.5px;
+}
 .row .lbl {
   font-family: var(--editor-font-family);
   font-variant-numeric: tabular-nums;
@@ -165,8 +169,8 @@ html, body {
   white-space: nowrap;
 }
 .row .line1 .num, .row .line1 .t { flex: none; }
-/* The detail line wraps rather than being clipped: the pane is narrow, and a
-   lost hit rate is worse than a second line. */
+
+/* The detail line wraps rather than being clipped in narrow panes. */
 .row .line2 {
   color: var(--muted-foreground);
   font-size: 11px;
@@ -181,7 +185,7 @@ html, body {
 }
 
 /* The container carries the indent, not the row: a step keeps the same left
-   padding as a turn, and the border is what shows it belongs to one. */
+   padding as a turn, and the border shows nesting. */
 .steps { margin: 2px 0 8px 14px; border-left: 1px solid var(--card-border); padding-left: 8px; }
 .steps .row { padding: 4px var(--gutter); }
 

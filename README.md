@@ -94,13 +94,57 @@ streaming time, never an unweighted mean of per-step rates):
 ## Install
 
 ```bash
+npm run build
+agy plugin install dist/agy-usage-hud
+```
+
+Or validate and install directly from the repository root:
+
+```bash
 agy plugin validate . --strict
 agy plugin install .
 ```
 
-Or copy this directory into `~/.gemini/config/plugins/agy-usage-hud/` (keep the
-directory name `agy-usage-hud` so `sidecar://` links resolve cleanly) and enable
-it in **Customizations -> Installed**.
+Or copy `dist/agy-usage-hud/` into `~/.gemini/config/plugins/agy-usage-hud/`
+(keep the directory name `agy-usage-hud` so `sidecar://` links resolve cleanly)
+and enable it in **Customizations -> Installed**.
 
 Open the panel from the auxiliary side pane's `+` menu or via
 `sidecar://agy-usage-hud/usage_hud/`.
+
+## Development
+
+Requires Node.js >= 22 (zero runtime or dev npm dependencies).
+
+```bash
+npm run check     # Syntax, manifest, asset, and skill checks
+npm test          # Run unit and integration tests (node:test)
+npm run build     # Package clean plugin bundle to dist/agy-usage-hud/
+npm run verify    # Run check + test + build
+```
+
+### Project layout
+
+```text
+agy-usage-hud/
+├── plugin.json                     # Antigravity plugin manifest
+├── assets/logo.svg                 # Adaptive 128x128 logo
+├── skills/usage-hud/SKILL.md       # Companion skill for chat prompts
+├── sidecars/usage_hud/
+│   ├── sidecar.json                # Sidecar manifest
+│   ├── main.mjs                    # SidecarApp HTTP server & snapshot cache
+│   ├── lib/
+│   │   ├── protobuf.mjs            # BigInt-safe protobuf wire walker
+│   │   ├── sources.mjs             # Transcript, SQLite, and LS RPC adapters
+│   │   └── usage.mjs               # Pure turn/step aggregation & summary
+│   └── web/
+│       ├── index.html              # Side panel shell & boot watchdog
+│       ├── format.js               # Pure formatting & contrast helpers
+│       ├── app.js                  # DOM renderer, polling & theme sync
+│       ├── styles.css              # Layout & theme-variable styles
+│       └── scrollbars.css          # Theme-adaptive scrollbar styles
+├── scripts/
+│   ├── check.mjs                   # Static verification script
+│   └── build.mjs                   # Distributable bundle builder
+└── tests/                          # node:test suites
+```

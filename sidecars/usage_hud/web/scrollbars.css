@@ -1,0 +1,44 @@
+/*
+ * Theme-adaptive scrollbars.
+ *
+ * Uses ::-webkit-scrollbar rules (rather than standard scrollbar-width /
+ * scrollbar-color, which override ::-webkit- and re-introduce stepper buttons)
+ * with a foreground-derived thumb tint so both light and dark themes remain
+ * visible.
+ */
+
+.ag-scroll {
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Reserve scrollbar width at all times so content never shifts horizontally. */
+  scrollbar-gutter: stable;
+}
+
+.ag-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+.ag-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* No stepper arrows at either end. */
+.ag-scroll::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.ag-scroll::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+  background-color: color-mix(in srgb, var(--foreground) 24%, transparent);
+}
+
+.ag-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}

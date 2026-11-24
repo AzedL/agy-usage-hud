@@ -1,0 +1,17 @@
+{
+  "name": "agy-usage-hud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only Antigravity side panel plugin showing per-conversation turns, steps, token usage, cache hit rate, streaming throughput, and context window fullness.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "validate": "agy plugin validate . --strict",
+    "build": "node scripts/build.mjs",
+    "verify": "npm run check && npm test && npm run build"
+  }
+}
