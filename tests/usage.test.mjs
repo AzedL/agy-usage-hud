@@ -176,6 +176,166 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snap.summary.contextUsed, 20_000);
     assert.equal(snap.summary.contextMax, FALLBACK_CONTEXT_WINDOW);
     assert.equal(snap.summary.contextSource, 'fallback');
+    assert.equal(snap.summary.contextWindowAligned, false);
+    assert.equal(snap.context.alignmentReason, 'fallback');
     assert.equal(snap.model, 'gemini-4-neon');
+  });
+
+  it('never double-consumes a timing record across byStepIndex and bySecond indices', () => {
+    const ts = '2026-11-24T10:00:10Z';
+    const sec = Math.floor(Date.parse(ts) / 1000);
+    const timingA = {
+      streamMs: 1000,
+      ttftMs: 100,
+      response: 200,
+      thinking: 50,
+      hasSplit: true,
+      source: 'generator',
+    };
+
+    // Case 1: Step 10 matches byStepIndex; Step 11 in the same second must NOT reuse timingA.
+    const steps1 = [
+      { step_index: 9, type: 'USER_INPUT', created_at: '2026-11-24T10:00:09Z' },
+      {
+        step_index: 10,
+        type: 'PLANNER_RESPONSE',
+        created_at: ts,
+        model: 'flash',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 250,
+      },
+      {
+        step_index: 11,
+        type: 'PLANNER_RESPONSE',
+        created_at: ts,
+        model: 'flash',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 250,
+      },
+    ];
+    const timings1 = {
+      byStepIndex: new Map([[10, timingA]]),
+      bySecond: new Map([[sec, [timingA]]]),
+    };
+
+    const snap1 = buildSnapshot({ conv: 'aaaa1111', build: '1', steps: steps1, timings: timings1, meta: null });
+    assert.equal(snap1.turns[0].steps[0].rate, 200);
+    assert.equal(snap1.turns[0].steps[1].rate, null);
+    assert.equal(snap1.turns[0].steps[1].timingSource, null);
+    assert.equal(snap1.summary.generatorMatchedSteps, 1);
+    assert.equal(snap1.summary.meteredSteps, 2);
+
+    // Case 2: Earlier unmatched step (step 10) must NOT steal timingB belonging to exact match step 11.
+    const timingB = {
+      streamMs: 1000,
+      ttftMs: 100,
+      response: 300,
+      thinking: 0,
+      hasSplit: true,
+      source: 'generator',
+    };
+    const timings2 = {
+      byStepIndex: new Map([[11, timingB]]),
+      bySecond: new Map([[sec, [timingB]]]),
+    };
+    const snap2 = buildSnapshot({ conv: 'aaaa1111', build: '1', steps: steps1, timings: timings2, meta: null });
+    assert.equal(snap2.turns[0].steps[0].timingSource, null);
+    assert.equal(snap2.turns[0].steps[1].rate, 300);
+  });
+
+  it('computes wait durations from prior call completion time when timing is available', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:00Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 100,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:10Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 100,
+      },
+      { step_index: 3, type: 'USER_INPUT', created_at: '2026-11-24T10:01:20Z' },
+      {
+        step_index: 4,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:01:21Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 100,
+      },
+    ];
+
+    // Step 1: 00:00 + 2s TTFT + 3s stream -> finishes at 00:05. Step 2 starts at 00:10 -> wait = 5s (not 10s).
+    // Step 2: 00:10 + 4s TTFT + 6s stream -> finishes at 00:20. Turn 2 starts at 01:20 -> wait = 60s (not 70s).
+    const timings = {
+      byStepIndex: new Map([
+        [1, { streamMs: 3000, ttftMs: 2000, response: 100, thinking: 0, hasSplit: true, source: 'generator' }],
+        [2, { streamMs: 6000, ttftMs: 4000, response: 100, thinking: 0, hasSplit: true, source: 'generator' }],
+      ]),
+      bySecond: new Map(),
+    };
+
+    const snap = buildSnapshot({ conv: 'aaaa1111', build: '1', steps, timings, meta: null });
+    assert.equal(snap.turns[0].steps[1].gapMs, 5000);
+    assert.equal(snap.turns[0].steps[1].gapBasis, 'completion');
+    assert.equal(snap.turns[1].gapBeforeMs, 60_000);
+    assert.equal(snap.turns[1].gapBeforeBasis, 'completion');
+    assert.equal(snap.turns[1].steps[0].gapMs, 60_000);
+  });
+
+  it('flags context window as unaligned when gen_metadata lags behind after a model switch', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:01Z',
+        model: 'model-a',
+        input_tokens: 1000,
+        cache_read_tokens: 9000,
+        output_tokens: 100,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:05Z',
+        model: 'model-b',
+        input_tokens: 1000,
+        cache_read_tokens: 399_000,
+        output_tokens: 100,
+      },
+    ];
+
+    const laggingMeta = {
+      maxContextTokens: 409_600,
+      maxContextTokensSeen: [409_600],
+      estimatedTokensUsed: 10_000,
+      rows: 1, // lags behind summary.steps (2)
+      source: 'gen_metadata',
+    };
+
+    const snapLag = buildSnapshot({ conv: 'aaaa1111', build: '1', steps, timings: null, meta: laggingMeta });
+    assert.equal(snapLag.summary.contextWindowAligned, false);
+    assert.equal(snapLag.context.aligned, false);
+    assert.equal(snapLag.context.alignmentReason, 'metadata-lag');
+
+    const syncedMeta = { ...laggingMeta, maxContextTokens: 1_000_000, rows: 2 };
+    const snapOk = buildSnapshot({ conv: 'aaaa1111', build: '1', steps, timings: null, meta: syncedMeta });
+    assert.equal(snapOk.summary.contextWindowAligned, true);
+    assert.equal(snapOk.context.aligned, true);
+    assert.equal(snapOk.context.alignmentReason, 'matched');
   });
 });

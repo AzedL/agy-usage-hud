@@ -1,9 +1,10 @@
 /**
  * Pure usage aggregation and snapshot assembly for Usage HUD.
  *
- * Separates domain calculations (turn grouping, timing joins, weighted
- * streaming throughput, context fullness) from filesystem/SQLite/RPC I/O so
- * every metric rule can be tested deterministically.
+ * Separates domain calculations (turn grouping, shared-state timing joins,
+ * completion-based wait intervals, weighted streaming throughput, context
+ * fullness & alignment) from filesystem/SQLite/RPC I/O so every metric rule
+ * can be tested deterministically.
  */
 
 /**
@@ -98,32 +99,76 @@ export function buildTurns(steps) {
   return turns.map((t, i) => ({ ...t, index: i }));
 }
 
-function matchTiming(timings, stepIndex, atMs, consumedByStep, cursorBySecond) {
-  if (!timings) return undefined;
+/**
+ * Allocates timing entries to planner steps across two passes using a single
+ * shared `consumed` Set of timing object references:
+ *   Pass 1: Exact `step_index` matches (`byStepIndex`).
+ *   Pass 2: Timestamp fallback (`bySecond`), skipping any entry already consumed.
+ *
+ * This prevents double-consumption when both indices are present and ensures
+ * an earlier unmatched step cannot steal a timing belonging to a later exact
+ * `step_index` match.
+ *
+ * @param {Array<{ steps: Array<Record<string, unknown>> }>} visibleTurns
+ * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
+ * @returns {Map<object, object>}
+ */
+export function assignTimings(visibleTurns, timings) {
+  const assigned = new Map();
+  if (!timings) return assigned;
 
-  if (
-    timings.byStepIndex instanceof Map &&
-    typeof stepIndex === 'number' &&
-    timings.byStepIndex.has(stepIndex) &&
-    !consumedByStep.has(stepIndex)
-  ) {
-    consumedByStep.add(stepIndex);
-    return timings.byStepIndex.get(stepIndex);
+  const plannerSteps = [];
+  for (const t of visibleTurns) {
+    for (const d of t.steps) {
+      if (isPlanner(d)) plannerSteps.push(d);
+    }
   }
 
-  if (atMs !== null && timings.bySecond instanceof Map) {
-    const sec = Math.floor(atMs / 1000);
-    const queue = timings.bySecond.get(sec);
-    if (Array.isArray(queue)) {
-      const idx = cursorBySecond.get(sec) ?? 0;
-      if (idx < queue.length) {
-        cursorBySecond.set(sec, idx + 1);
-        return queue[idx];
+  const consumed = new Set();
+
+  // Pass 1: exact step_index matches.
+  if (timings.byStepIndex instanceof Map) {
+    for (const d of plannerSteps) {
+      if (typeof d.step_index !== 'number') continue;
+      const entry = timings.byStepIndex.get(d.step_index);
+      if (entry && !consumed.has(entry)) {
+        assigned.set(d, entry);
+        consumed.add(entry);
       }
     }
   }
 
-  return undefined;
+  // Pass 2: truncated-second queue fallback for remaining unmatched steps.
+  if (timings.bySecond instanceof Map) {
+    for (const d of plannerSteps) {
+      if (assigned.has(d)) continue;
+      const at = ms(d.created_at);
+      if (at === null) continue;
+      const queue = timings.bySecond.get(Math.floor(at / 1000));
+      if (!Array.isArray(queue)) continue;
+      const entry = queue.find((candidate) => candidate && !consumed.has(candidate));
+      if (entry) {
+        assigned.set(d, entry);
+        consumed.add(entry);
+      }
+    }
+  }
+
+  return assigned;
+}
+
+/**
+ * Estimates a planner call's completion timestamp.
+ * When timing is available:
+ *  - LS (`generator`): `created_at + ttftMs + streamMs`
+ *  - SQLite (`steps`): `created_at + streamMs` (equals `viewableAt`)
+ * Without timing, falls back to `created_at`.
+ */
+function estimateStepEnd(at, timing) {
+  if (at === null) return null;
+  if (!timing) return { endAt: at, basis: 'created_at' };
+  const elapsed = (timing.ttftMs ?? 0) + (timing.streamMs ?? 0);
+  return { endAt: at + Math.max(0, elapsed), basis: 'completion' };
 }
 
 /**
@@ -136,9 +181,10 @@ function matchTiming(timings, stepIndex, atMs, consumedByStep, cursorBySecond) {
  */
 export function aggregateTurns(turns, timings) {
   const visibleTurns = turns.filter((t) => !(t.implicit && !t.steps.some(isPlanner)));
-  const consumedByStep = new Set();
-  const cursorBySecond = new Map();
-  let prevPlannerEnd = null;
+  const timingByStep = assignTimings(visibleTurns, timings);
+
+  let prevTurnEnd = null;
+  let prevTurnEndBasis = null;
 
   return visibleTurns.map((t, visibleIdx) => {
     const planner = t.steps.filter(isPlanner);
@@ -148,16 +194,15 @@ export function aggregateTurns(turns, timings) {
     const output = metered.reduce((a, d) => a + (d.output_tokens || 0), 0);
 
     const start = ms(t.userInput?.created_at) ?? ms(t.steps[0]?.created_at);
-    const end =
-      ms(planner[planner.length - 1]?.created_at) ??
-      ms(t.steps[t.steps.length - 1]?.created_at);
-    const durationMs = start !== null && end !== null && end >= start ? end - start : null;
     const gapBeforeMs =
-      prevPlannerEnd !== null && start !== null ? Math.max(0, start - prevPlannerEnd) : null;
-    if (end !== null) prevPlannerEnd = end;
+      prevTurnEnd !== null && start !== null ? Math.max(0, start - prevTurnEnd) : null;
+    const gapBeforeBasis = gapBeforeMs !== null ? prevTurnEndBasis : null;
 
     const stepRows = [];
     let prevStepEnd = null;
+    let prevStepBasis = null;
+    let lastPlannerEnd = null;
+    let lastPlannerBasis = null;
     let turnStreamMs = 0;
     let turnStreamedOutput = 0;
     let turnThinking = 0;
@@ -169,7 +214,8 @@ export function aggregateTurns(turns, timings) {
       const i = isMetered ? d.input_tokens || 0 : null;
       const o = isMetered ? d.output_tokens || 0 : null;
       const at = ms(d.created_at);
-      const timing = matchTiming(timings, d.step_index, at, consumedByStep, cursorBySecond);
+      const timing = timingByStep.get(d);
+      const completed = estimateStepEnd(at, timing);
 
       const streamedOutput =
         timing && isMetered ? effectiveStreamedOutput(timing, o) : null;
@@ -185,6 +231,9 @@ export function aggregateTurns(turns, timings) {
         turnThinking += timing.thinking;
       }
 
+      const gapMs =
+        at !== null && prevStepEnd !== null ? Math.max(0, at - prevStepEnd) : null;
+
       stepRows.push({
         // 1-based position inside the turn: what the pane labels "#n".
         index: stepRows.length + 1,
@@ -197,7 +246,9 @@ export function aggregateTurns(turns, timings) {
         prompt: isMetered ? i + c : null,
         hitRate: isMetered ? hitRate(i, c) : null,
         at,
-        gapMs: at !== null && prevStepEnd !== null ? Math.max(0, at - prevStepEnd) : null,
+        endAt: completed ? completed.endAt : null,
+        gapMs,
+        gapBasis: gapMs !== null ? prevStepBasis : null,
         streamMs: timing ? timing.streamMs : null,
         ttftMs: timing ? timing.ttftMs : null,
         timingSource: timing ? timing.source : null,
@@ -207,11 +258,28 @@ export function aggregateTurns(turns, timings) {
         rate: hasTimedOutput ? rateOf(streamedOutput, timing.streamMs) : null,
       });
 
-      if (at !== null) prevStepEnd = at;
+      if (completed) {
+        prevStepEnd = completed.endAt;
+        prevStepBasis = completed.basis;
+        lastPlannerEnd = completed.endAt;
+        lastPlannerBasis = completed.basis;
+      }
     }
 
     // The first step of a turn carries the turn's own wait since the previous turn.
-    if (stepRows.length) stepRows[0].gapMs = gapBeforeMs;
+    if (stepRows.length) {
+      stepRows[0].gapMs = gapBeforeMs;
+      stepRows[0].gapBasis = gapBeforeBasis;
+    }
+
+    const fallbackEnd = ms(t.steps[t.steps.length - 1]?.created_at);
+    const end = lastPlannerEnd ?? fallbackEnd;
+    const endBasis = lastPlannerEnd !== null ? lastPlannerBasis : fallbackEnd !== null ? 'created_at' : null;
+    const durationMs = start !== null && end !== null && end >= start ? end - start : null;
+    if (end !== null) {
+      prevTurnEnd = end;
+      prevTurnEndBasis = endBasis;
+    }
 
     const turnTps = rateOf(turnStreamedOutput, turnStreamMs);
 
@@ -227,6 +295,7 @@ export function aggregateTurns(turns, timings) {
       tps: turnTps,
       thinking: turnThinking,
       gapBeforeMs,
+      gapBeforeBasis,
       stepCount: stepRows.length,
       meteredSteps: metered.length,
       hasUsage: metered.length > 0,
@@ -259,17 +328,23 @@ export function summarizeConversation(turns) {
   let streamMs = 0;
   let streamedOutput = 0;
   let timedSteps = 0;
+  let matchedSteps = 0;
+  let generatorMatchedSteps = 0;
   let thinking = 0;
   let timingSource = null;
 
   for (const t of turns) {
     for (const s of t.steps) {
       if (typeof s.thinking === 'number' && s.thinking > 0) thinking += s.thinking;
+      if (s.metered && s.timingSource) {
+        matchedSteps += 1;
+        if (s.timingSource === 'generator') generatorMatchedSteps += 1;
+        if (!timingSource) timingSource = s.timingSource;
+      }
       if (s.metered && s.streamMs > 0 && s.streamedOutput > 0) {
         streamMs += s.streamMs;
         streamedOutput += s.streamedOutput;
         timedSteps += 1;
-        if (!timingSource && s.timingSource) timingSource = s.timingSource;
       }
     }
   }
@@ -280,6 +355,8 @@ export function summarizeConversation(turns) {
     turns: turns.length,
     steps: turns.reduce((a, t) => a + t.stepCount, 0),
     meteredSteps,
+    matchedSteps,
+    generatorMatchedSteps,
     hasUsage: meteredSteps > 0,
     input,
     cache,
@@ -298,6 +375,22 @@ export function summarizeConversation(turns) {
 }
 
 /**
+ * Evaluates whether the context window denominator from `gen_metadata` can be
+ * treated as aligned with the latest model call.
+ */
+function assessContextAlignment(meta, summary, distinctModels) {
+  if (!meta) return { aligned: false, reason: 'fallback' };
+  const metaRows = typeof meta.rows === 'number' ? meta.rows : null;
+  const multipleModels = distinctModels.size > 1;
+  const multipleWindows = Array.isArray(meta.maxContextTokensSeen) && meta.maxContextTokensSeen.length > 1;
+
+  if (metaRows !== null && metaRows < summary.steps && (multipleModels || multipleWindows)) {
+    return { aligned: false, reason: 'metadata-lag' };
+  }
+  return { aligned: true, reason: 'matched' };
+}
+
+/**
  * Builds the final `/api/usage` response payload from already-loaded inputs.
  *
  * @param {{
@@ -305,7 +398,7 @@ export function summarizeConversation(turns) {
  *   build: string,
  *   steps: Array<Record<string, unknown>>,
  *   timings: { byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null,
- *   meta: { maxContextTokens: number, maxContextTokensSeen?: number[], estimatedTokensUsed?: number | null, source?: string } | null,
+ *   meta: { maxContextTokens: number, maxContextTokensSeen?: number[], estimatedTokensUsed?: number | null, rows?: number, source?: string } | null,
  * }} params
  */
 export function buildSnapshot({ conv, build, steps, timings, meta }) {
@@ -314,21 +407,25 @@ export function buildSnapshot({ conv, build, steps, timings, meta }) {
 
   let lastMeteredStep = null;
   let lastModel = null;
+  const distinctModels = new Set();
+
   for (let ti = turns.length - 1; ti >= 0; ti -= 1) {
     const turnSteps = turns[ti].steps;
     for (let si = turnSteps.length - 1; si >= 0; si -= 1) {
       const s = turnSteps[si];
-      if (!lastModel && s.model) lastModel = s.model;
+      if (s.model) {
+        distinctModels.add(s.model);
+        if (!lastModel) lastModel = s.model;
+      }
       if (!lastMeteredStep && s.metered) lastMeteredStep = s;
-      if (lastModel && lastMeteredStep) break;
     }
-    if (lastModel && lastMeteredStep) break;
   }
 
   const contextUsed = lastMeteredStep
     ? lastMeteredStep.prompt
     : (meta?.estimatedTokensUsed ?? null);
   const contextMax = meta?.maxContextTokens ?? FALLBACK_CONTEXT_WINDOW;
+  const alignment = assessContextAlignment(meta, summary, distinctModels);
 
   return {
     conversationId: conv,
@@ -341,10 +438,14 @@ export function buildSnapshot({ conv, build, steps, timings, meta }) {
       contextMax,
       contextRatio: contextUsed !== null && contextMax > 0 ? contextUsed / contextMax : null,
       contextSource: meta ? 'gen_metadata' : 'fallback',
+      contextWindowAligned: alignment.aligned,
     },
     context: {
       maxContextTokens: contextMax,
       maxContextTokensSeen: meta?.maxContextTokensSeen ?? null,
+      metaRows: meta?.rows ?? null,
+      aligned: alignment.aligned,
+      alignmentReason: alignment.reason,
       source: meta?.source ?? null,
     },
     turns,

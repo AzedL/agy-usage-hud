@@ -40,4 +40,4 @@ Apply the exact same definitions used by the Usage HUD sidecar:
    - Compare against `max_context_tokens` when known (otherwise note the `512k` fallback denominator).
 5. **Diagnosing cache loss**:
    - For each turn, compute both cache hit rate (`cache / (input + cache)`) and uncached `input_tokens` added.
-   - Highlight the turns with the lowest hit rate and/or largest uncached `input_tokens` spikes, noting any long idle wait between turns (cache TTL expiry often shows up after >5 minute gaps).
+   - Highlight the turns with the lowest hit rate and/or largest uncached `input_tokens` spikes, noting any long interval between turns (`created_at` gaps in `transcript.jsonl` include the prior call's generation time; the Usage HUD sidecar subtracts `timeToFirstToken + streamingDuration` when timing data is available to approximate true idle wait).

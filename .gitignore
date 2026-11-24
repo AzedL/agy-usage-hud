@@ -8,6 +8,8 @@ dist/
 *.log
 npm-debug.log*
 .tmp/
+.tmp-*
+.regress/
 coverage/
 
 # OS & editor files

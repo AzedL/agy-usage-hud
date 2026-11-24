@@ -2,14 +2,16 @@
  * Usage HUD sidecar HTTP entrypoint.
  *
  * Read-only Antigravity sidecar serving the web UI (`web/`) and `/api/usage`
- * for the open conversation. Uses a stat-signature cache + in-flight request
- * deduplication to avoid repeated full-transcript reads, SQLite scans, and
- * `GetCascadeTrajectory` RPCs when a conversation is idle.
+ * for the open conversation. Uses a stat-signature cache with bounded
+ * partial-timing retries and in-flight request deduplication to avoid repeated
+ * full-transcript reads, SQLite scans, and `GetCascadeTrajectory` RPCs when a
+ * conversation is idle.
  */
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Response, SidecarApp } from 'sidecar_sdk';
+import { SnapshotCache } from './lib/cache.mjs';
 import {
   appDataFor,
   conversationStatSignature,
@@ -23,12 +25,10 @@ import { buildSnapshot } from './lib/usage.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = join(__dirname, 'web');
 
-const MAX_CACHE_ENTRIES = 16;
-const LS_RETRY_TTL_MS = 5000;
-
 /** Files whose modification time stamps the running build for live reloads. */
 const WATCHED_FILES = [
   'main.mjs',
+  'lib/cache.mjs',
   'lib/protobuf.mjs',
   'lib/sources.mjs',
   'lib/usage.mjs',
@@ -56,19 +56,9 @@ function buildStamp() {
   return stamps.join('-');
 }
 
-/** @type {Map<string, { sig: string, at: number, payload: object }>} */
-const snapshotCache = new Map();
+const snapshotCache = new SnapshotCache({ maxEntries: 16 });
 /** @type {Map<string, Promise<object>>} */
 const inFlight = new Map();
-
-function setCache(conv, entry) {
-  if (snapshotCache.has(conv)) snapshotCache.delete(conv);
-  snapshotCache.set(conv, entry);
-  if (snapshotCache.size > MAX_CACHE_ENTRIES) {
-    const oldestKey = snapshotCache.keys().next().value;
-    snapshotCache.delete(oldestKey);
-  }
-}
 
 async function computeSnapshot(conv, activeConversationId) {
   const build = buildStamp();
@@ -92,17 +82,9 @@ async function computeSnapshot(conv, activeConversationId) {
   }
 
   const sig = `${build}|${conversationStatSignature(appData, conv)}`;
-  const cached = snapshotCache.get(conv);
   const hasLs = Boolean(process.env.ANTIGRAVITY_LS_ADDRESS && process.env.ANTIGRAVITY_CSRF_TOKEN);
-  if (cached && cached.sig === sig) {
-    const missingGeneratorTiming =
-      hasLs &&
-      cached.payload?.hasUsage &&
-      cached.payload?.summary?.timingSource !== 'generator';
-    if (!missingGeneratorTiming || Date.now() - cached.at < LS_RETRY_TTL_MS) {
-      return cached.payload;
-    }
-  }
+  const cached = snapshotCache.get(conv, sig, { hasLs });
+  if (cached) return cached;
 
   const steps = readSteps(appData, conv);
   if (!steps) {
@@ -111,7 +93,7 @@ async function computeSnapshot(conv, activeConversationId) {
 
   const { meta, timings } = await loadMetricsData(appData, conv);
   const payload = buildSnapshot({ conv, build, steps, timings, meta });
-  setCache(conv, { sig, at: Date.now(), payload });
+  snapshotCache.set(conv, sig, payload, { hasLs });
   return payload;
 }
 

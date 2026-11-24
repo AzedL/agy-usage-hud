@@ -101,12 +101,6 @@ function renderSummary(data) {
   card.append(ctx);
 
   if (s.contextUsed !== null) card.append(contextBar(s.contextUsed, s.contextMax));
-
-  if (s.contextSource !== 'gen_metadata') {
-    const note = el('div', 'card-note', 'window: fallback ' + tok(s.contextMax));
-    note.style.marginTop = '4px';
-    card.append(note);
-  }
   return card;
 }
 
@@ -183,11 +177,18 @@ function renderTurn(turn, open) {
   row.setAttribute('role', 'button');
   row.setAttribute('tabindex', '0');
   row.setAttribute('aria-expanded', String(open));
+  row.dataset.turnIndex = String(turn.index);
 
   return open ? [row, renderSteps(turn)] : [row];
 }
 
 function render(data) {
+  const active = document.activeElement;
+  const focusedTurn =
+    active && root.contains(active)
+      ? active.closest('[data-turn-index]')?.dataset?.turnIndex ?? null
+      : null;
+
   root.replaceChildren();
 
   if (data.error) {
@@ -225,6 +226,11 @@ function render(data) {
   });
 
   if (!visible.length) root.append(el('div', 'empty', 'No turns recorded.'));
+
+  if (focusedTurn !== null) {
+    const target = root.querySelector(`[data-turn-index="${focusedTurn}"]`);
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+  }
 }
 
 // ---------------------------------------------------------------------------

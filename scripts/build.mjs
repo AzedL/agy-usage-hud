@@ -23,6 +23,7 @@ const OUT_DIR = join(DIST_ROOT, pluginName);
 const INCLUDE = [
   'plugin.json',
   'README.md',
+  'LICENSE',
   'assets',
   'skills',
   'sidecars',

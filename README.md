@@ -35,8 +35,9 @@ is `input + cache_read`.
 
 **Every failure path falls back to 512,000.** If `node:sqlite` is unavailable,
 the database is absent, the protobuf blob fails to parse, or the schema changes,
-the denominator falls back to `512k` and the summary card displays
-`window: fallback 512k`.
+the denominator falls back to `512.0k` directly in the context row (while
+`summary.contextSource` in `/api/usage` reports `fallback` and
+`context.aligned` reports whether `gen_metadata` is aligned after model switches).
 
 ## Reading the HUD
 
@@ -58,8 +59,12 @@ global `step_index`.
 Two values carry semantic colour:
 
 - **Wait duration** (at the end of a row's title): green `< 1m`, amber `< 5m`,
-  red `>= 5m`. The first turn and its first step have nothing before them, so
-  they show no wait.
+  red `>= 5m`. When timing data is available, waits are measured from the
+  previous call's completion (`created_at + timeToFirstToken + streamingDuration`,
+  or `viewableAt` in the SQLite fallback) so the prior call's own generation
+  time is excluded; without timing data it falls back to creation-to-creation
+  intervals (`gapBasis` in `/api/usage` indicates `'completion'` vs `'created_at'`).
+  The first turn and its first step have nothing before them, so they show no wait.
 - **Cache hit rate** (right-hand column): green `>= 80%`, amber `>= 50%`, red
   `< 50%`.
 
@@ -134,6 +139,7 @@ agy-usage-hud/
 │   ├── sidecar.json                # Sidecar manifest
 │   ├── main.mjs                    # SidecarApp HTTP server & snapshot cache
 │   ├── lib/
+│   │   ├── cache.mjs               # Bounded LRU snapshot cache & LS retry backoff
 │   │   ├── protobuf.mjs            # BigInt-safe protobuf wire walker
 │   │   ├── sources.mjs             # Transcript, SQLite, and LS RPC adapters
 │   │   └── usage.mjs               # Pure turn/step aggregation & summary
