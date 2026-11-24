@@ -48,6 +48,10 @@ describe('frontend formatting helpers', () => {
     assert.equal(stepCountLabel(1), '1 step');
     assert.equal(stepCountLabel(24), '24 steps');
     assert.equal(usageText(100, 20_000, 500, 150), 'in 100 \u00b7 cache 20.0k \u00b7 out 500 \u00b7 150 tok/s');
+    assert.equal(
+      usageText(100, 20_000, 500, 45, { estimatedRate: true }),
+      'in 100 \u00b7 cache 20.0k \u00b7 out 500 \u00b7 ~45.0 tok/s',
+    );
     assert.equal(usageText(100, 20_000, 500, null), 'in 100 \u00b7 cache 20.0k \u00b7 out 500');
   });
 

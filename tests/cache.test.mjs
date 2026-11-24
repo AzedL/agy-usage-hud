@@ -23,8 +23,12 @@ describe('SnapshotCache completeness and retry policy', () => {
     assert.equal(isTimingComplete(complete, true), true);
   });
 
-  it('retries partial LS snapshots with bounded backoff and locks in once LS catches up', () => {
-    const cache = new SnapshotCache({ maxEntries: 4, retryDelaysMs: [3000, 6000] });
+  it('retries partial LS snapshots with backoff, then probes at steadyRetryMs until LS catches up', () => {
+    const cache = new SnapshotCache({
+      maxEntries: 4,
+      retryDelaysMs: [3000, 6000],
+      steadyRetryMs: 300_000,
+    });
     const sig = 'b1|100:50|0|0';
     const partial = makePayload({ meteredSteps: 10, generatorMatchedSteps: 9 });
     const complete = makePayload({ meteredSteps: 10, generatorMatchedSteps: 10 });
@@ -41,17 +45,18 @@ describe('SnapshotCache completeness and retry policy', () => {
     assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 9500 }), partial);
     assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 10000 }), null);
 
-    // Still partial after second retry -> retries exhausted (2 >= 2), stop hammering LS
+    // Still partial after fast backoff exhausted -> settles to steadyRetryMs (5 min), NOT locked forever
     cache.set('conv-1', sig, partial, { hasLs: true, now: 10000 });
-    assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 999_999 }), partial);
+    assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 309_999 }), partial);
+    assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 310_000 }), null);
 
-    // Disk signature changes -> retry budget resets and cache misses immediately
+    // LS recovers on steady probe -> complete locks in indefinitely for the same sig
+    cache.set('conv-1', sig, complete, { hasLs: true, now: 310_000 });
+    assert.equal(cache.get('conv-1', sig, { hasLs: true, now: 9_999_999 }), complete);
+
+    // Disk signature changes -> cache misses immediately
     const sig2 = 'b1|200:80|0|0';
-    assert.equal(cache.get('conv-1', sig2, { hasLs: true, now: 1_000_000 }), null);
-
-    // Once complete, stays cached indefinitely for the same sig
-    cache.set('conv-1', sig2, complete, { hasLs: true, now: 1_000_000 });
-    assert.equal(cache.get('conv-1', sig2, { hasLs: true, now: 9_999_999 }), complete);
+    assert.equal(cache.get('conv-1', sig2, { hasLs: true, now: 10_000_000 }), null);
   });
 
   it('evicts oldest entry when exceeding maxEntries', () => {

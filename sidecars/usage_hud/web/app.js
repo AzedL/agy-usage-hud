@@ -49,9 +49,29 @@ function contextBar(used, max) {
   return bar;
 }
 
-/** Wait since the previous model call, coloured by its duration. */
-function waitSpan(ms) {
-  return el('span', 't ' + ageClass(ms), '+' + dur(ms));
+/**
+ * Wait since the previous model call, coloured by its duration.
+ * When `basis === 'created_at'`, timing data was unavailable so the interval
+ * includes the prior call's execution time; prefix with `~` and add a tooltip.
+ */
+function waitSpan(ms, basis) {
+  const approx = basis === 'created_at';
+  const span = el('span', 't ' + ageClass(ms), (approx ? '~+' : '+') + dur(ms));
+  span.title = approx
+    ? 'Interval between call start times (timing unavailable; includes prior call duration)'
+    : 'Wait since previous call completed';
+  return span;
+}
+
+function contextTooltip(reason) {
+  if (reason === 'fallback') return 'Estimated context window (fallback 512k)';
+  if (reason === 'latest-row-missing-window') {
+    return 'Estimated context window (latest metadata row has no window size)';
+  }
+  if (reason === 'metadata-lag') {
+    return 'Estimated context window (metadata lags behind recent model switch)';
+  }
+  return '';
 }
 
 function renderHead(data) {
@@ -70,10 +90,20 @@ function renderSummary(data) {
   grid.append(metric('steps', fmt(s.steps)));
 
   if (data.hasUsage) {
+    const coarseTps = s.tps !== null && s.tps !== undefined && s.tpsSource === 'steps';
+    const tpsNode = metric(
+      'tps',
+      s.tps === null || s.tps === undefined
+        ? '\u2014'
+        : (coarseTps ? '~' : '') + tps(s.tps) + ' tok/s',
+    );
+    if (coarseTps) {
+      tpsNode.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+    }
     grid.append(metric('input', tok(s.input)));
     grid.append(metric('cache', tok(s.cache)));
     grid.append(metric('output', tok(s.output)));
-    grid.append(metric('tps', s.tps === null || s.tps === undefined ? '\u2014' : tps(s.tps) + ' tok/s'));
+    grid.append(tpsNode);
     grid.append(metric('total', tok(s.total)));
     grid.append(metric('hit', pct(s.hitRate)));
   }
@@ -88,16 +118,21 @@ function renderSummary(data) {
   const ctx = el('div', 'metric');
   ctx.style.marginTop = '8px';
   ctx.append(el('span', 'k', 'context'));
-  ctx.append(
-    el(
-      'span',
-      'v',
-      (s.contextUsed === null ? '\u2014' : tok(s.contextUsed)) +
-        ' / ' +
-        tok(s.contextMax) +
-        (s.contextRatio === null ? '' : '  ' + pct(s.contextRatio)),
-    ),
+  const unaligned = s.contextWindowAligned === false;
+  const maxLabel = (unaligned ? '~' : '') + tok(s.contextMax);
+  const ctxVal = el(
+    'span',
+    'v',
+    (s.contextUsed === null ? '\u2014' : tok(s.contextUsed)) +
+      ' / ' +
+      maxLabel +
+      (s.contextRatio === null ? '' : '  ' + pct(s.contextRatio)),
   );
+  if (unaligned) {
+    const tip = contextTooltip(data.context?.alignmentReason);
+    if (tip) ctxVal.title = tip;
+  }
+  ctx.append(ctxVal);
   card.append(ctx);
 
   if (s.contextUsed !== null) card.append(contextBar(s.contextUsed, s.contextMax));
@@ -127,14 +162,18 @@ function renderSteps(turn) {
     line.append(el('span', 'model', st.model || '\u2014'));
     if (st.prompt !== null) line.append(el('span', 'num', tok(st.prompt)));
     // The first step of the conversation has nothing before it.
-    if (st.gapMs !== null) line.append(waitSpan(st.gapMs));
+    if (st.gapMs !== null) line.append(waitSpan(st.gapMs, st.gapBasis));
     mid.append(line);
 
-    mid.append(
-      st.metered
-        ? usageLine(usageText(st.input, st.cache, st.output, stepRate(st)))
-        : usageLine('no usage'),
-    );
+    const stRate = stepRate(st);
+    const coarseStepRate = stRate !== null && st.timingSource === 'steps';
+    const detail = st.metered
+      ? usageLine(usageText(st.input, st.cache, st.output, stRate, { estimatedRate: coarseStepRate }))
+      : usageLine('no usage');
+    if (coarseStepRate) {
+      detail.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+    }
+    mid.append(detail);
     row.append(mid, hitCell(st.hitRate));
     box.append(row);
   }
@@ -151,14 +190,17 @@ function renderTurn(turn, open) {
   line.append(el('span', 'num', clock(turn.start)));
   line.append(el('span', 'num', stepCountLabel(turn.stepCount)));
   // The first turn of the conversation has nothing before it.
-  if (turn.gapBeforeMs !== null) line.append(waitSpan(turn.gapBeforeMs));
+  if (turn.gapBeforeMs !== null) line.append(waitSpan(turn.gapBeforeMs, turn.gapBeforeBasis));
   mid.append(line);
 
-  mid.append(
-    turn.hasUsage
-      ? usageLine(usageText(turn.input, turn.cache, turn.output, turn.tps))
-      : usageLine('no usage'),
-  );
+  const coarseTurnRate = turn.tps !== null && turn.tps !== undefined && turn.tpsSource === 'steps';
+  const detail = turn.hasUsage
+    ? usageLine(usageText(turn.input, turn.cache, turn.output, turn.tps, { estimatedRate: coarseTurnRate }))
+    : usageLine('no usage');
+  if (coarseTurnRate) {
+    detail.title = 'Estimated rate from SQLite timestamps (includes time to first token)';
+  }
+  mid.append(detail);
   row.append(mid, hitCell(turn.hasUsage ? turn.hitRate : null));
 
   if (!turn.steps.length) return [row];

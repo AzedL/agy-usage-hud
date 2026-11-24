@@ -83,8 +83,12 @@ export function stepCountLabel(count) {
   return n === 1 ? '1 step' : `${n} steps`;
 }
 
-/** Formats `"in 2382 · cache 407.0k · out 1055 · 210.4 tok/s"`. */
-export function usageText(input, cache, output, rate) {
+/**
+ * Formats `"in 2382 · cache 407.0k · out 1055 · 210.4 tok/s"` (or
+ * `"· ~45.0 tok/s"` when `estimatedRate` is true for SQLite coarse timings).
+ */
+export function usageText(input, cache, output, rate, { estimatedRate = false } = {}) {
+  const ratePrefix = estimatedRate ? '~' : '';
   return (
     'in ' +
     tok(input) +
@@ -92,7 +96,7 @@ export function usageText(input, cache, output, rate) {
     tok(cache) +
     ' \u00b7 out ' +
     tok(output) +
-    (rate === null || rate === undefined ? '' : ' \u00b7 ' + tps(rate) + ' tok/s')
+    (rate === null || rate === undefined ? '' : ' \u00b7 ' + ratePrefix + tps(rate) + ' tok/s')
   );
 }
 

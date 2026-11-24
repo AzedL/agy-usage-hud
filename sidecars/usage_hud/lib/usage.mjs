@@ -1,10 +1,10 @@
 /**
  * Pure usage aggregation and snapshot assembly for Usage HUD.
  *
- * Separates domain calculations (turn grouping, shared-state timing joins,
- * completion-based wait intervals, weighted streaming throughput, context
- * fullness & alignment) from filesystem/SQLite/RPC I/O so every metric rule
- * can be tested deterministically.
+ * Separates domain calculations (turn grouping, per-call primary/fallback
+ * timing joins, completion-based wait intervals, source-isolated streaming
+ * throughput, context fullness & alignment) from filesystem/SQLite/RPC I/O so
+ * every metric rule can be tested deterministically.
  */
 
 /**
@@ -99,38 +99,15 @@ export function buildTurns(steps) {
   return turns.map((t, i) => ({ ...t, index: i }));
 }
 
-/**
- * Allocates timing entries to planner steps across two passes using a single
- * shared `consumed` Set of timing object references:
- *   Pass 1: Exact `step_index` matches (`byStepIndex`).
- *   Pass 2: Timestamp fallback (`bySecond`), skipping any entry already consumed.
- *
- * This prevents double-consumption when both indices are present and ensures
- * an earlier unmatched step cannot steal a timing belonging to a later exact
- * `step_index` match.
- *
- * @param {Array<{ steps: Array<Record<string, unknown>> }>} visibleTurns
- * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
- * @returns {Map<object, object>}
- */
-export function assignTimings(visibleTurns, timings) {
-  const assigned = new Map();
-  if (!timings) return assigned;
-
-  const plannerSteps = [];
-  for (const t of visibleTurns) {
-    for (const d of t.steps) {
-      if (isPlanner(d)) plannerSteps.push(d);
-    }
-  }
-
+function allocateFromSource(plannerSteps, source, assigned) {
+  if (!source) return;
   const consumed = new Set();
 
   // Pass 1: exact step_index matches.
-  if (timings.byStepIndex instanceof Map) {
+  if (source.byStepIndex instanceof Map) {
     for (const d of plannerSteps) {
-      if (typeof d.step_index !== 'number') continue;
-      const entry = timings.byStepIndex.get(d.step_index);
+      if (assigned.has(d) || typeof d.step_index !== 'number') continue;
+      const entry = source.byStepIndex.get(d.step_index);
       if (entry && !consumed.has(entry)) {
         assigned.set(d, entry);
         consumed.add(entry);
@@ -139,12 +116,12 @@ export function assignTimings(visibleTurns, timings) {
   }
 
   // Pass 2: truncated-second queue fallback for remaining unmatched steps.
-  if (timings.bySecond instanceof Map) {
+  if (source.bySecond instanceof Map) {
     for (const d of plannerSteps) {
       if (assigned.has(d)) continue;
       const at = ms(d.created_at);
       if (at === null) continue;
-      const queue = timings.bySecond.get(Math.floor(at / 1000));
+      const queue = source.bySecond.get(Math.floor(at / 1000));
       if (!Array.isArray(queue)) continue;
       const entry = queue.find((candidate) => candidate && !consumed.has(candidate));
       if (entry) {
@@ -153,7 +130,32 @@ export function assignTimings(visibleTurns, timings) {
       }
     }
   }
+}
 
+/**
+ * Allocates timing entries to planner steps across primary (Language Server)
+ * and optional per-call fallback (SQLite `steps`) sources. Within each source,
+ * exact `byStepIndex` matches run before `bySecond` fallback using a single
+ * shared `consumed` Set so no timing record can ever be consumed twice.
+ *
+ * @param {Array<{ steps: Array<Record<string, unknown>> }>} visibleTurns
+ * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
+ * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} [fallbackTimings]
+ * @returns {Map<object, object>}
+ */
+export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
+  const assigned = new Map();
+  if (!timings && !fallbackTimings) return assigned;
+
+  const plannerSteps = [];
+  for (const t of visibleTurns) {
+    for (const d of t.steps) {
+      if (isPlanner(d)) plannerSteps.push(d);
+    }
+  }
+
+  allocateFromSource(plannerSteps, timings, assigned);
+  allocateFromSource(plannerSteps, fallbackTimings, assigned);
   return assigned;
 }
 
@@ -176,12 +178,17 @@ function estimateStepEnd(at, timing) {
  * Implicit leading turns that contain no planner calls are excluded so turn
  * totals, `#n` labels, and rendered rows stay consistent.
  *
+ * Weighted turn TPS never mixes true streaming timings (`generator`) with
+ * coarse SQLite timings (`steps`): whenever any `generator` step has streamed
+ * output, turn TPS is computed exclusively from `generator` steps.
+ *
  * @param {ReturnType<typeof buildTurns>} turns
  * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
+ * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} [fallbackTimings]
  */
-export function aggregateTurns(turns, timings) {
+export function aggregateTurns(turns, timings, fallbackTimings = null) {
   const visibleTurns = turns.filter((t) => !(t.implicit && !t.steps.some(isPlanner)));
-  const timingByStep = assignTimings(visibleTurns, timings);
+  const timingByStep = assignTimings(visibleTurns, timings, fallbackTimings);
 
   let prevTurnEnd = null;
   let prevTurnEndBasis = null;
@@ -203,8 +210,10 @@ export function aggregateTurns(turns, timings) {
     let prevStepBasis = null;
     let lastPlannerEnd = null;
     let lastPlannerBasis = null;
-    let turnStreamMs = 0;
-    let turnStreamedOutput = 0;
+    let genStreamMs = 0;
+    let genStreamedOutput = 0;
+    let stepsStreamMs = 0;
+    let stepsStreamedOutput = 0;
     let turnThinking = 0;
 
     for (const d of t.steps) {
@@ -224,8 +233,13 @@ export function aggregateTurns(turns, timings) {
       );
 
       if (hasTimedOutput) {
-        turnStreamMs += timing.streamMs;
-        turnStreamedOutput += streamedOutput;
+        if (timing.source === 'generator') {
+          genStreamMs += timing.streamMs;
+          genStreamedOutput += streamedOutput;
+        } else {
+          stepsStreamMs += timing.streamMs;
+          stepsStreamedOutput += streamedOutput;
+        }
       }
       if (timing && typeof timing.thinking === 'number' && timing.thinking > 0) {
         turnThinking += timing.thinking;
@@ -274,14 +288,19 @@ export function aggregateTurns(turns, timings) {
 
     const fallbackEnd = ms(t.steps[t.steps.length - 1]?.created_at);
     const end = lastPlannerEnd ?? fallbackEnd;
-    const endBasis = lastPlannerEnd !== null ? lastPlannerBasis : fallbackEnd !== null ? 'created_at' : null;
+    const endBasis =
+      lastPlannerEnd !== null ? lastPlannerBasis : fallbackEnd !== null ? 'created_at' : null;
     const durationMs = start !== null && end !== null && end >= start ? end - start : null;
     if (end !== null) {
       prevTurnEnd = end;
       prevTurnEndBasis = endBasis;
     }
 
+    const useGenTps = genStreamMs > 0;
+    const turnStreamMs = useGenTps ? genStreamMs : stepsStreamMs;
+    const turnStreamedOutput = useGenTps ? genStreamedOutput : stepsStreamedOutput;
     const turnTps = rateOf(turnStreamedOutput, turnStreamMs);
+    const tpsSource = turnTps !== null ? (useGenTps ? 'generator' : 'steps') : null;
 
     return {
       index: visibleIdx,
@@ -293,6 +312,7 @@ export function aggregateTurns(turns, timings) {
       streamMs: turnStreamMs > 0 ? turnStreamMs : null,
       streamedOutput: turnStreamedOutput,
       tps: turnTps,
+      tpsSource,
       thinking: turnThinking,
       gapBeforeMs,
       gapBeforeBasis,
@@ -312,6 +332,8 @@ export function aggregateTurns(turns, timings) {
 
 /**
  * Rolls up L2 turns into the L1 conversation summary.
+ * Keeps `generator` (true streaming) and `steps` (TTFT + streaming) separate
+ * when computing conversation-level TPS.
  *
  * @param {ReturnType<typeof aggregateTurns>} turns
  */
@@ -325,13 +347,16 @@ export function summarizeConversation(turns) {
   const last = [...plannerTurns].reverse().find((t) => t.end !== null);
   const spanMs = first && last && last.end >= first.start ? last.end - first.start : null;
 
-  let streamMs = 0;
-  let streamedOutput = 0;
-  let timedSteps = 0;
+  let genStreamMs = 0;
+  let genStreamedOutput = 0;
+  let genTimedSteps = 0;
+  let stepsStreamMs = 0;
+  let stepsStreamedOutput = 0;
+  let stepsTimedSteps = 0;
   let matchedSteps = 0;
   let generatorMatchedSteps = 0;
+  let stepsMatchedSteps = 0;
   let thinking = 0;
-  let timingSource = null;
 
   for (const t of turns) {
     for (const s of t.steps) {
@@ -339,17 +364,33 @@ export function summarizeConversation(turns) {
       if (s.metered && s.timingSource) {
         matchedSteps += 1;
         if (s.timingSource === 'generator') generatorMatchedSteps += 1;
-        if (!timingSource) timingSource = s.timingSource;
+        else if (s.timingSource === 'steps') stepsMatchedSteps += 1;
       }
       if (s.metered && s.streamMs > 0 && s.streamedOutput > 0) {
-        streamMs += s.streamMs;
-        streamedOutput += s.streamedOutput;
-        timedSteps += 1;
+        if (s.timingSource === 'generator') {
+          genStreamMs += s.streamMs;
+          genStreamedOutput += s.streamedOutput;
+          genTimedSteps += 1;
+        } else if (s.timingSource === 'steps') {
+          stepsStreamMs += s.streamMs;
+          stepsStreamedOutput += s.streamedOutput;
+          stepsTimedSteps += 1;
+        }
       }
     }
   }
 
+  const useGenTps = genStreamMs > 0;
+  const streamMs = useGenTps ? genStreamMs : stepsStreamMs;
+  const streamedOutput = useGenTps ? genStreamedOutput : stepsStreamedOutput;
+  const timedSteps = useGenTps ? genTimedSteps : stepsTimedSteps;
   const conversationTps = rateOf(streamedOutput, streamMs);
+  const tpsSource = conversationTps !== null ? (useGenTps ? 'generator' : 'steps') : null;
+
+  let timingSource = null;
+  if (generatorMatchedSteps > 0 && stepsMatchedSteps > 0) timingSource = 'mixed';
+  else if (generatorMatchedSteps > 0) timingSource = 'generator';
+  else if (stepsMatchedSteps > 0) timingSource = 'steps';
 
   return {
     turns: turns.length,
@@ -357,6 +398,7 @@ export function summarizeConversation(turns) {
     meteredSteps,
     matchedSteps,
     generatorMatchedSteps,
+    stepsMatchedSteps,
     hasUsage: meteredSteps > 0,
     input,
     cache,
@@ -367,6 +409,7 @@ export function summarizeConversation(turns) {
     spanMs,
     streamMs: streamMs > 0 ? streamMs : null,
     tps: conversationTps,
+    tpsSource,
     timedSteps,
     thinking,
     response: streamedOutput,
@@ -380,9 +423,13 @@ export function summarizeConversation(turns) {
  */
 function assessContextAlignment(meta, summary, distinctModels) {
   if (!meta) return { aligned: false, reason: 'fallback' };
+  if (meta.lastRowHasMax === false) {
+    return { aligned: false, reason: 'latest-row-missing-window' };
+  }
   const metaRows = typeof meta.rows === 'number' ? meta.rows : null;
   const multipleModels = distinctModels.size > 1;
-  const multipleWindows = Array.isArray(meta.maxContextTokensSeen) && meta.maxContextTokensSeen.length > 1;
+  const multipleWindows =
+    Array.isArray(meta.maxContextTokensSeen) && meta.maxContextTokensSeen.length > 1;
 
   if (metaRows !== null && metaRows < summary.steps && (multipleModels || multipleWindows)) {
     return { aligned: false, reason: 'metadata-lag' };
@@ -398,11 +445,12 @@ function assessContextAlignment(meta, summary, distinctModels) {
  *   build: string,
  *   steps: Array<Record<string, unknown>>,
  *   timings: { byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null,
- *   meta: { maxContextTokens: number, maxContextTokensSeen?: number[], estimatedTokensUsed?: number | null, rows?: number, source?: string } | null,
+ *   fallbackTimings?: { byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null,
+ *   meta: { maxContextTokens: number, maxContextTokensSeen?: number[], estimatedTokensUsed?: number | null, rows?: number, validRows?: number, lastRowHasMax?: boolean, source?: string } | null,
  * }} params
  */
-export function buildSnapshot({ conv, build, steps, timings, meta }) {
-  const turns = aggregateTurns(buildTurns(steps), timings);
+export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = null, meta }) {
+  const turns = aggregateTurns(buildTurns(steps), timings, fallbackTimings);
   const summary = summarizeConversation(turns);
 
   let lastMeteredStep = null;
@@ -444,6 +492,8 @@ export function buildSnapshot({ conv, build, steps, timings, meta }) {
       maxContextTokens: contextMax,
       maxContextTokensSeen: meta?.maxContextTokensSeen ?? null,
       metaRows: meta?.rows ?? null,
+      validRows: meta?.validRows ?? null,
+      lastRowHasMax: meta?.lastRowHasMax ?? null,
       aligned: alignment.aligned,
       alignmentReason: alignment.reason,
       source: meta?.source ?? null,

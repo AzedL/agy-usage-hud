@@ -332,10 +332,108 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snapLag.context.aligned, false);
     assert.equal(snapLag.context.alignmentReason, 'metadata-lag');
 
-    const syncedMeta = { ...laggingMeta, maxContextTokens: 1_000_000, rows: 2 };
+    const syncedMeta = { ...laggingMeta, maxContextTokens: 1_000_000, rows: 2, lastRowHasMax: true };
     const snapOk = buildSnapshot({ conv: 'aaaa1111', build: '1', steps, timings: null, meta: syncedMeta });
     assert.equal(snapOk.summary.contextWindowAligned, true);
     assert.equal(snapOk.context.aligned, true);
     assert.equal(snapOk.context.alignmentReason, 'matched');
+
+    // Equal row count, but the latest row itself lacked max_context_tokens
+    const missingLastMeta = { ...syncedMeta, lastRowHasMax: false };
+    const snapMissingLast = buildSnapshot({
+      conv: 'aaaa1111',
+      build: '1',
+      steps,
+      timings: null,
+      meta: missingLastMeta,
+    });
+    assert.equal(snapMissingLast.summary.contextWindowAligned, false);
+    assert.equal(snapMissingLast.context.alignmentReason, 'latest-row-missing-window');
+  });
+
+  it('falls back per call to SQLite timings without mixing TPS methodologies', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-24T10:00:00Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:00Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 200,
+      },
+      {
+        step_index: 2,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:00:10Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 200,
+      },
+      { step_index: 3, type: 'USER_INPUT', created_at: '2026-11-24T10:01:00Z' },
+      {
+        step_index: 4,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-24T10:01:01Z',
+        model: 'gemini-4-neon',
+        input_tokens: 100,
+        cache_read_tokens: 900,
+        output_tokens: 100,
+      },
+    ];
+
+    // LS only has step 1 (true streaming: 200 tok / 1s = 200 tok/s).
+    const lsTimings = {
+      byStepIndex: new Map([
+        [1, { streamMs: 1000, ttftMs: 500, response: 200, thinking: 0, hasSplit: true, source: 'generator' }],
+      ]),
+      bySecond: new Map(),
+      count: 1,
+      source: 'generator',
+    };
+    // SQLite has step 1, step 2 (coarse 10s wall-clock -> 20 tok/s), and step 4.
+    const sqliteFallback = {
+      byStepIndex: new Map([
+        [1, { streamMs: 1500, ttftMs: null, response: 200, thinking: 0, hasSplit: true, source: 'steps' }],
+        [2, { streamMs: 10_000, ttftMs: null, response: 200, thinking: 0, hasSplit: true, source: 'steps' }],
+        [4, { streamMs: 2000, ttftMs: null, response: 100, thinking: 0, hasSplit: true, source: 'steps' }],
+      ]),
+      bySecond: new Map(),
+      count: 3,
+      source: 'steps',
+    };
+
+    const snap = buildSnapshot({
+      conv: 'aaaa1111',
+      build: '1',
+      steps,
+      timings: lsTimings,
+      fallbackTimings: sqliteFallback,
+      meta: null,
+    });
+
+    // Step 1 uses LS; step 2 & step 4 fall back to SQLite individually
+    assert.equal(snap.turns[0].steps[0].timingSource, 'generator');
+    assert.equal(snap.turns[0].steps[0].rate, 200);
+    assert.equal(snap.turns[0].steps[1].timingSource, 'steps');
+    assert.equal(snap.turns[0].steps[1].rate, 20);
+    // Turn 2's wait benefits from Step 2's SQLite completion time (10:00:10 + 10s = 10:00:20 -> 40s wait, not 50s!)
+    assert.equal(snap.turns[1].gapBeforeMs, 40_000);
+    assert.equal(snap.turns[1].gapBeforeBasis, 'completion');
+
+    // Turn 1 & conversation TPS MUST NOT dilute 200 tok/s with SQLite's coarse 20 tok/s
+    assert.equal(snap.turns[0].tps, 200);
+    assert.equal(snap.turns[0].tpsSource, 'generator');
+    assert.equal(snap.summary.tps, 200);
+    assert.equal(snap.summary.tpsSource, 'generator');
+    assert.equal(snap.summary.timingSource, 'mixed');
+    // Turn 2 has only SQLite steps, so its TPS uses SQLite with tpsSource: 'steps'
+    assert.equal(snap.turns[1].tps, 50);
+    assert.equal(snap.turns[1].tpsSource, 'steps');
+    // Cache completeness still sees only 1/3 generator-matched steps
+    assert.equal(snap.summary.generatorMatchedSteps, 1);
+    assert.equal(snap.summary.stepsMatchedSteps, 2);
   });
 });

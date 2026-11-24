@@ -35,9 +35,9 @@ is `input + cache_read`.
 
 **Every failure path falls back to 512,000.** If `node:sqlite` is unavailable,
 the database is absent, the protobuf blob fails to parse, or the schema changes,
-the denominator falls back to `512.0k` directly in the context row (while
-`summary.contextSource` in `/api/usage` reports `fallback` and
-`context.aligned` reports whether `gen_metadata` is aligned after model switches).
+the denominator falls back to `~512.0k` directly in the context row (a `~`
+prefix indicates an estimated or unaligned window, with details in the tooltip
+and `context.alignmentReason` in `/api/usage`).
 
 ## Reading the HUD
 
@@ -63,7 +63,7 @@ Two values carry semantic colour:
   previous call's completion (`created_at + timeToFirstToken + streamingDuration`,
   or `viewableAt` in the SQLite fallback) so the prior call's own generation
   time is excluded; without timing data it falls back to creation-to-creation
-  intervals (`gapBasis` in `/api/usage` indicates `'completion'` vs `'created_at'`).
+  intervals prefixed with `~` (e.g. `~+7.0m`, `gapBasis: 'created_at'`).
   The first turn and its first step have nothing before them, so they show no wait.
 - **Cache hit rate** (right-hand column): green `>= 80%`, amber `>= 50%`, red
   `< 50%`.
@@ -86,10 +86,12 @@ streaming time, never an unweighted mean of per-step rates):
   `responseOutputTokens` whenever available.
 - **Streaming time, not wall-clock call time.** The language server's
   `generatorMetadata` reports `streamingDuration` and `timeToFirstToken`
-  separately. When the language server cannot be reached (e.g. standalone runs),
-  the `steps` table (`createdAt` to `viewableAt`) serves as a coarse fallback
-  that includes first-token wait; `timingSource` in `/api/usage` reports which
-  source was used (`generator` or `steps`).
+  separately. When the language server cannot be reached — or only covers a
+  subset of calls — the `steps` table (`createdAt` to `viewableAt`) serves as a
+  per-call fallback for unmatched calls. Turn and conversation `tok/s` never mix
+  the two methodologies: whenever `generator` samples exist, aggregated `tok/s`
+  is computed strictly from `generator` samples (`tpsSource: 'generator'`);
+  SQLite-only estimates are prefixed with `~` (`tpsSource: 'steps'`).
 - **Minimum streaming duration (`200 ms`).** Calls whose streaming window is
   under `200 ms` show their token counts without a throughput figure, since a
   handful of tokens over tens of milliseconds does not reflect sustained speed.

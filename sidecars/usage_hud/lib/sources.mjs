@@ -289,7 +289,7 @@ export function extractGeneratorTimings(body) {
     count += 1;
   }
 
-  return count > 0 ? { byStepIndex, bySecond, source: 'generator' } : null;
+  return count > 0 ? { byStepIndex, bySecond, count, source: 'generator' } : null;
 }
 
 /**
@@ -350,14 +350,21 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
       const rows = db.prepare('select data from gen_metadata order by idx').all();
       const windows = [];
       const estimated = [];
-      for (const row of rows) {
-        const buf = row?.data;
-        if (!buf || typeof buf.length !== 'number') continue;
-        const fields = walkVarints(buf, { allowedPrefixes: GEN_METADATA_PREFIXES });
-        const max = fields.get(MAX_CONTEXT_PATH);
-        const used = fields.get(ESTIMATED_USED_PATH);
-        if (typeof max === 'number' && max > 0) windows.push(max);
-        if (typeof used === 'number' && used >= 0) estimated.push(used);
+      let lastRowHasMax = false;
+      for (let rowIdx = 0; rowIdx < rows.length; rowIdx += 1) {
+        const buf = rows[rowIdx]?.data;
+        let rowHasMax = false;
+        if (buf && typeof buf.length === 'number') {
+          const fields = walkVarints(buf, { allowedPrefixes: GEN_METADATA_PREFIXES });
+          const max = fields.get(MAX_CONTEXT_PATH);
+          const used = fields.get(ESTIMATED_USED_PATH);
+          if (typeof max === 'number' && max > 0) {
+            windows.push(max);
+            rowHasMax = true;
+          }
+          if (typeof used === 'number' && used >= 0) estimated.push(used);
+        }
+        if (rowIdx === rows.length - 1) lastRowHasMax = rowHasMax;
       }
       if (windows.length) {
         meta = {
@@ -365,6 +372,8 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
           maxContextTokensSeen: [...new Set(windows)].sort((a, b) => a - b),
           estimatedTokensUsed: estimated.length ? estimated[estimated.length - 1] : null,
           rows: rows.length,
+          validRows: windows.length,
+          lastRowHasMax,
           source: 'gen_metadata',
         };
       }
@@ -411,7 +420,7 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
           count += 1;
         }
         if (count > 0) {
-          stepTimings = { byStepIndex, bySecond, source: 'steps' };
+          stepTimings = { byStepIndex, bySecond, count, source: 'steps' };
         }
       } catch {
         stepTimings = null;
@@ -433,20 +442,22 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
 /**
  * Loads timing and context metadata for `conv`.
  * Runs the language server RPC in parallel with `gen_metadata` when LS env vars
- * are present, and only reads fallback `steps` rows from SQLite when LS timings
- * are unavailable.
+ * are present. If LS is unavailable OR returns fewer timings than `expectedSteps`,
+ * also loads fallback `steps` timings from SQLite so unmatched calls can fall
+ * back individually without losing LS timings on matched calls.
  *
  * @param {string} appData
  * @param {string} conv
- * @param {{ env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch, expectedSteps?: number }} [options]
  */
 export async function loadMetricsData(appData, conv, options = {}) {
   const env = options.env ?? process.env;
+  const expectedSteps = options.expectedSteps ?? 0;
   const hasLs = Boolean(env.ANTIGRAVITY_LS_ADDRESS && env.ANTIGRAVITY_CSRF_TOKEN);
 
   if (!hasLs) {
     const { meta, stepTimings } = await loadDbData(appData, conv, { includeStepTimings: true });
-    return { meta, timings: stepTimings };
+    return { meta, timings: stepTimings, fallbackTimings: null };
   }
 
   const [fromLs, dbInitial] = await Promise.all([
@@ -454,10 +465,14 @@ export async function loadMetricsData(appData, conv, options = {}) {
     loadDbData(appData, conv, { includeStepTimings: false }),
   ]);
 
-  if (fromLs) {
-    return { meta: dbInitial.meta, timings: fromLs };
+  if (fromLs && (expectedSteps <= 0 || fromLs.count >= expectedSteps)) {
+    return { meta: dbInitial.meta, timings: fromLs, fallbackTimings: null };
   }
 
   const fallback = await loadDbData(appData, conv, { includeStepTimings: true });
-  return { meta: fallback.meta ?? dbInitial.meta, timings: fallback.stepTimings };
+  const meta = fallback.meta ?? dbInitial.meta;
+  if (fromLs) {
+    return { meta, timings: fromLs, fallbackTimings: fallback.stepTimings };
+  }
+  return { meta, timings: fallback.stepTimings, fallbackTimings: null };
 }

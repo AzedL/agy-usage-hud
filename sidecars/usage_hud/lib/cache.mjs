@@ -2,14 +2,16 @@
  * Bounded LRU snapshot cache with partial-timing retry backoff.
  *
  * When the Antigravity Language Server is reachable, `GetCascadeTrajectory`
- * occasionally lags behind `transcript.jsonl` writes by a few hundred
- * milliseconds. Tracking `generatorMatchedSteps < meteredSteps` (rather than
- * merely `timingSource !== 'generator'`) ensures partially timed snapshots
- * converge once LS catches up, while bounded exponential backoff avoids
- * hammering LS indefinitely on permanently partial historical conversations.
+ * occasionally lags behind `transcript.jsonl` writes or recovers after a brief
+ * restart/sleep. Tracking `generatorMatchedSteps < meteredSteps` ensures
+ * partially timed snapshots converge once LS catches up: retries step through
+ * fast backoff delays (`retryDelaysMs`) and then settle into a low-frequency
+ * steady probe interval (`steadyRetryMs`, default 5 minutes) instead of
+ * permanently locking incomplete data.
  */
 
 export const DEFAULT_RETRY_DELAYS_MS = [3000, 6000, 12000, 30000];
+export const DEFAULT_STEADY_RETRY_MS = 5 * 60 * 1000;
 
 /**
  * Returns true when the snapshot's LS timing data is complete (or LS is not
@@ -28,11 +30,16 @@ export function isTimingComplete(payload, hasLs) {
 
 export class SnapshotCache {
   /**
-   * @param {{ maxEntries?: number, retryDelaysMs?: number[] }} [options]
+   * @param {{ maxEntries?: number, retryDelaysMs?: number[], steadyRetryMs?: number }} [options]
    */
-  constructor({ maxEntries = 16, retryDelaysMs = DEFAULT_RETRY_DELAYS_MS } = {}) {
+  constructor({
+    maxEntries = 16,
+    retryDelaysMs = DEFAULT_RETRY_DELAYS_MS,
+    steadyRetryMs = DEFAULT_STEADY_RETRY_MS,
+  } = {}) {
     this.maxEntries = maxEntries;
     this.retryDelaysMs = retryDelaysMs;
+    this.steadyRetryMs = steadyRetryMs;
     /** @type {Map<string, { sig: string, at: number, payload: object, retries: number }>} */
     this.entries = new Map();
   }
@@ -54,11 +61,11 @@ export class SnapshotCache {
       return entry.payload;
     }
 
-    if (entry.retries >= this.retryDelaysMs.length) {
-      return entry.payload;
-    }
+    const waitMs =
+      entry.retries < this.retryDelaysMs.length
+        ? this.retryDelaysMs[entry.retries]
+        : this.steadyRetryMs;
 
-    const waitMs = this.retryDelaysMs[entry.retries];
     if (now - entry.at < waitMs) {
       return entry.payload;
     }
@@ -78,7 +85,9 @@ export class SnapshotCache {
     const prev = this.entries.get(conv);
     const complete = isTimingComplete(payload, hasLs);
     const retries =
-      !complete && prev && prev.sig === sig ? prev.retries + 1 : 0;
+      !complete && prev && prev.sig === sig
+        ? Math.min(prev.retries + 1, this.retryDelaysMs.length)
+        : 0;
 
     if (this.entries.has(conv)) this.entries.delete(conv);
     this.entries.set(conv, { sig, at: now, payload, retries });

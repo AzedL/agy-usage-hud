@@ -198,6 +198,8 @@ describe('filesystem discovery and SQLite integration', () => {
       const { meta, stepTimings } = await loadDbData(tmp, conv, { includeStepTimings: true });
       assert.equal(meta.maxContextTokens, 1_048_576);
       assert.equal(meta.estimatedTokensUsed, 32_000);
+      assert.equal(meta.lastRowHasMax, true);
+      assert.equal(meta.validRows, 1);
       assert.ok(stepTimings);
       assert.equal(stepTimings.byStepIndex.get(1).streamMs, 1500);
       assert.equal(stepTimings.byStepIndex.get(1).response, 300);
@@ -207,6 +209,51 @@ describe('filesystem discovery and SQLite integration', () => {
       const metrics = await loadMetricsData(tmp, conv, { env: {} });
       assert.equal(metrics.meta.maxContextTokens, 1_048_576);
       assert.equal(metrics.timings.source, 'steps');
+      assert.equal(metrics.fallbackTimings, null);
+
+      // Partial LS coverage (1 timing < expectedSteps 2) also loads SQLite fallbackTimings
+      const partialLsFetch = async () => ({
+        ok: true,
+        json: async () => ({
+          trajectory: {
+            steps: [
+              {
+                type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+                metadata: {
+                  createdAt: '2026-11-24T10:00:10Z',
+                  sourceTrajectoryStepInfo: { stepIndex: 1 },
+                },
+              },
+            ],
+            generatorMetadata: [
+              {
+                stepIndices: [1],
+                chatModel: {
+                  streamingDuration: '0.5s',
+                  timeToFirstToken: '0.1s',
+                  usage: { responseOutputTokens: 100 },
+                },
+              },
+            ],
+          },
+        }),
+      });
+      const partialMetrics = await loadMetricsData(tmp, conv, {
+        env: { ANTIGRAVITY_LS_ADDRESS: 'localhost:5387', ANTIGRAVITY_CSRF_TOKEN: 'tok' },
+        fetchImpl: partialLsFetch,
+        expectedSteps: 2,
+      });
+      assert.equal(partialMetrics.timings.source, 'generator');
+      assert.equal(partialMetrics.fallbackTimings.source, 'steps');
+
+      // Adding a final gen_metadata row without max_context_tokens flips lastRowHasMax to false
+      const db2 = new DatabaseSync(dbPath);
+      db2.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, Buffer.from([]));
+      db2.close();
+      const { meta: meta2 } = await loadDbData(tmp, conv, { includeStepTimings: false });
+      assert.equal(meta2.rows, 2);
+      assert.equal(meta2.validRows, 1);
+      assert.equal(meta2.lastRowHasMax, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
