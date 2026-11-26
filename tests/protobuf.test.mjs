@@ -7,6 +7,8 @@ import {
   readVarint,
   STEP_CREATED,
   STEP_CREATED_NANO,
+  STEP_FINISHED,
+  STEP_FINISHED_NANO,
   STEP_METADATA_PREFIXES,
   STEP_RESPONSE,
   STEP_THINKING,
@@ -88,13 +90,15 @@ describe('walkVarints', () => {
     assert.equal(fields.get(ESTIMATED_USED_PATH), 123_456);
   });
 
-  it('extracts planner steps.metadata timestamps and token splits', () => {
+  it('extracts planner and checkpoint steps.metadata timestamps and token splits', () => {
     const created = Buffer.concat([encodeVarintField(1, 1_795_441_500), encodeVarintField(2, 250_000_000)]);
     const viewable = Buffer.concat([encodeVarintField(1, 1_795_441_502), encodeVarintField(2, 750_000_000)]);
+    const finished = Buffer.concat([encodeVarintField(1, 1_795_441_540), encodeVarintField(2, 500_000_000)]);
     const usage = Buffer.concat([encodeVarintField(9, 420), encodeVarintField(10, 180)]);
     const blob = Buffer.concat([
       encodeBytesField(1, created),
       encodeBytesField(6, viewable),
+      encodeBytesField(8, finished),
       encodeBytesField(9, usage),
     ]);
 
@@ -103,6 +107,8 @@ describe('walkVarints', () => {
     assert.equal(fields.get(STEP_CREATED_NANO), 250_000_000);
     assert.equal(fields.get(STEP_VIEWABLE), 1_795_441_502);
     assert.equal(fields.get(STEP_VIEWABLE_NANO), 750_000_000);
+    assert.equal(fields.get(STEP_FINISHED), 1_795_441_540);
+    assert.equal(fields.get(STEP_FINISHED_NANO), 500_000_000);
     assert.equal(fields.get(STEP_THINKING), 420);
     assert.equal(fields.get(STEP_RESPONSE), 180);
   });

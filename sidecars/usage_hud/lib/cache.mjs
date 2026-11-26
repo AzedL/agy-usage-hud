@@ -15,8 +15,9 @@ export const DEFAULT_STEADY_RETRY_MS = 5 * 60 * 1000;
 
 /**
  * Returns true when the snapshot's LS timing data covers every planner step
- * (or LS is not expected to supply timings). Matches the same planner-step
- * scope used by `hasUnmatchedPlannerSteps`.
+ * (or LS is not expected to supply timings). Compaction (`CHECKPOINT`) calls
+ * are not reported in LS `generatorMetadata`, so completeness tracks
+ * `plannerSteps` when present (falling back to `steps` for older payloads).
  *
  * @param {Record<string, any> | null | undefined} payload
  * @param {boolean} hasLs
@@ -24,10 +25,10 @@ export const DEFAULT_STEADY_RETRY_MS = 5 * 60 * 1000;
  */
 export function isTimingComplete(payload, hasLs) {
   if (!hasLs) return true;
-  const totalSteps = payload?.summary?.steps ?? 0;
-  if (totalSteps <= 0) return true;
+  const expectedSteps = payload?.summary?.plannerSteps ?? payload?.summary?.steps ?? 0;
+  if (expectedSteps <= 0) return true;
   const matched = payload?.summary?.generatorMatchedSteps ?? 0;
-  return matched >= totalSteps;
+  return matched >= expectedSteps;
 }
 
 export class SnapshotCache {

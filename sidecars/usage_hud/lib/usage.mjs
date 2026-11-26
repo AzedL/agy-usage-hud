@@ -28,9 +28,22 @@ export function isPlanner(step) {
   return step?.type === 'PLANNER_RESPONSE';
 }
 
+export function isCheckpoint(step) {
+  return step?.type === 'CHECKPOINT';
+}
+
 /**
- * Older builds record `PLANNER_RESPONSE` without usage fields. Such steps still
- * count as steps; they simply contribute no tokens.
+ * Model-invocation steps included in L1/L2/L3 usage aggregation: regular
+ * planner turns (`PLANNER_RESPONSE`) and context-compaction calls
+ * (`CHECKPOINT`).
+ */
+export function isModelCall(step) {
+  return isPlanner(step) || isCheckpoint(step);
+}
+
+/**
+ * Older builds record model steps without usage fields. Such steps still count
+ * as steps; they simply contribute no tokens.
  */
 export function hasTokens(step) {
   return typeof step?.input_tokens === 'number' && Number.isFinite(step.input_tokens);
@@ -99,19 +112,28 @@ export function buildTurns(steps) {
   return turns.map((t, i) => ({ ...t, index: i }));
 }
 
+function stepKindOf(step) {
+  return isCheckpoint(step) ? 'compact' : 'planner';
+}
+
 /**
- * Independently matches planner steps to timing records within a single source
- * (Pass 1: exact `byStepIndex`, Pass 2: `bySecond` queue fallback), using a
- * shared `consumed` Set so no entry in that source can be consumed twice.
+ * Independently matches model-call steps to timing records within a single
+ * source (Pass 1: exact `byStepIndex`, Pass 2: `bySecond` queue fallback),
+ * using a shared `consumed` Set so no entry in that source can be consumed
+ * twice. When a timing entry carries `stepKind`, Pass 2 refuses cross-kind
+ * matches (e.g. a `compact` entry cannot match a `planner` step in the same
+ * second).
  */
-function matchSourceTimings(plannerSteps, source) {
+function matchSourceTimings(modelSteps, source) {
   const matched = new Map();
   if (!source) return matched;
+  const eligible =
+    source.source === 'generator' ? modelSteps.filter(isPlanner) : modelSteps;
   const consumed = new Set();
 
   // Pass 1: exact step_index matches.
   if (source.byStepIndex instanceof Map) {
-    for (const d of plannerSteps) {
+    for (const d of eligible) {
       if (typeof d.step_index !== 'number') continue;
       const entry = source.byStepIndex.get(d.step_index);
       if (entry && !consumed.has(entry)) {
@@ -123,13 +145,19 @@ function matchSourceTimings(plannerSteps, source) {
 
   // Pass 2: truncated-second queue fallback for remaining unmatched steps.
   if (source.bySecond instanceof Map) {
-    for (const d of plannerSteps) {
+    for (const d of eligible) {
       if (matched.has(d)) continue;
       const at = ms(d.created_at);
       if (at === null) continue;
       const queue = source.bySecond.get(Math.floor(at / 1000));
       if (!Array.isArray(queue)) continue;
-      const entry = queue.find((candidate) => candidate && !consumed.has(candidate));
+      const kind = stepKindOf(d);
+      const entry = queue.find(
+        (candidate) =>
+          candidate &&
+          !consumed.has(candidate) &&
+          (!candidate.stepKind || candidate.stepKind === kind),
+      );
       if (entry) {
         matched.set(d, entry);
         consumed.add(entry);
@@ -141,8 +169,10 @@ function matchSourceTimings(plannerSteps, source) {
 }
 
 /**
- * Returns true if any planner step in `steps` fails to match an entry in
- * `timings` (using the exact same allocation rules as `aggregateTurns`).
+ * Returns true if any `PLANNER_RESPONSE` step in `steps` fails to match an
+ * entry in `timings` (using the exact same allocation rules as
+ * `aggregateTurns`). Compaction (`CHECKPOINT`) steps are excluded because the
+ * Language Server's `generatorMetadata` only covers planner calls.
  *
  * @param {Array<Record<string, unknown>>} steps
  * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} timings
@@ -156,7 +186,7 @@ export function hasUnmatchedPlannerSteps(steps, timings) {
 }
 
 /**
- * Allocates timing entries to planner steps across primary (Language Server)
+ * Allocates timing entries to model-call steps across primary (Language Server)
  * and optional per-call fallback (SQLite `steps`) sources. Each source performs
  * its own independent step-to-timing matching first, and results are merged per
  * step preferring primary over fallback. Separating alignment from source
@@ -172,17 +202,17 @@ export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
   const assigned = new Map();
   if (!timings && !fallbackTimings) return assigned;
 
-  const plannerSteps = [];
+  const modelSteps = [];
   for (const t of visibleTurns) {
     for (const d of t.steps) {
-      if (isPlanner(d)) plannerSteps.push(d);
+      if (isModelCall(d)) modelSteps.push(d);
     }
   }
 
-  const primary = matchSourceTimings(plannerSteps, timings);
-  const fallback = matchSourceTimings(plannerSteps, fallbackTimings);
+  const primary = matchSourceTimings(modelSteps, timings);
+  const fallback = matchSourceTimings(modelSteps, fallbackTimings);
 
-  for (const d of plannerSteps) {
+  for (const d of modelSteps) {
     const entry = primary.get(d) ?? fallback.get(d);
     if (entry) assigned.set(d, entry);
   }
@@ -190,7 +220,10 @@ export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
 }
 
 /**
- * Estimates a planner call's end timestamp for computing wait gaps.
+ * Estimates a model call's end timestamp for computing wait gaps.
+ *  - When total wall-clock duration is known (`durationMs >= 0`, e.g. SQLite
+ *    `CHECKPOINT` completion `/8 - /1`), returns `created_at + durationMs`
+ *    with `basis: 'completion'`.
  *  - When streaming completion is known (`streamMs > 0` or `hasCompletion`),
  *    returns `created_at + ttftMs + streamMs` with `basis: 'completion'`.
  *  - When only first-token timing is available (`ttftMs > 0`, e.g. SQLite row
@@ -201,6 +234,9 @@ export function assignTimings(visibleTurns, timings, fallbackTimings = null) {
 function estimateStepEnd(at, timing) {
   if (at === null) return null;
   if (!timing) return { endAt: at, basis: 'created_at' };
+  if (typeof timing.durationMs === 'number' && timing.durationMs >= 0) {
+    return { endAt: at + timing.durationMs, basis: 'completion' };
+  }
   const ttft = typeof timing.ttftMs === 'number' && timing.ttftMs > 0 ? timing.ttftMs : 0;
   const stream = typeof timing.streamMs === 'number' && timing.streamMs > 0 ? timing.streamMs : 0;
   if (stream > 0 || timing.hasCompletion) {
@@ -226,15 +262,17 @@ function estimateStepEnd(at, timing) {
  * @param {{ byStepIndex?: Map<number, object>, bySecond?: Map<number, object[]> } | null} [fallbackTimings]
  */
 export function aggregateTurns(turns, timings, fallbackTimings = null) {
-  const visibleTurns = turns.filter((t) => !(t.implicit && !t.steps.some(isPlanner)));
+  const visibleTurns = turns.filter((t) => !(t.implicit && !t.steps.some(isModelCall)));
   const timingByStep = assignTimings(visibleTurns, timings, fallbackTimings);
 
   let prevTurnEnd = null;
   let prevTurnEndBasis = null;
 
   return visibleTurns.map((t, visibleIdx) => {
-    const planner = t.steps.filter(isPlanner);
-    const metered = planner.filter(hasTokens);
+    const modelCalls = t.steps.filter(isModelCall);
+    const plannerSteps = modelCalls.filter(isPlanner).length;
+    const compactSteps = modelCalls.filter(isCheckpoint).length;
+    const metered = modelCalls.filter(hasTokens);
     const input = metered.reduce((a, d) => a + (d.input_tokens || 0), 0);
     const cache = metered.reduce((a, d) => a + (d.cache_read_tokens || 0), 0);
     const output = metered.reduce((a, d) => a + (d.output_tokens || 0), 0);
@@ -247,8 +285,8 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
     const stepRows = [];
     let prevStepEnd = null;
     let prevStepBasis = null;
-    let lastPlannerEnd = null;
-    let lastPlannerBasis = null;
+    let lastCallEnd = null;
+    let lastCallBasis = null;
     let genStreamMs = 0;
     let genStreamedOutput = 0;
     let genTimedSteps = 0;
@@ -258,7 +296,8 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
     let turnThinking = 0;
 
     for (const d of t.steps) {
-      if (!isPlanner(d)) continue;
+      if (!isModelCall(d)) continue;
+      const kind = stepKindOf(d);
       const isMetered = hasTokens(d);
       const c = isMetered ? d.cache_read_tokens || 0 : null;
       const i = isMetered ? d.input_tokens || 0 : null;
@@ -295,6 +334,7 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
         // 1-based position inside the turn: what the pane labels "#n".
         index: stepRows.length + 1,
         stepIndex: d.step_index ?? null,
+        kind,
         model: typeof d.model === 'string' && d.model ? d.model : null,
         metered: isMetered,
         input: i,
@@ -304,6 +344,7 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
         hitRate: isMetered ? hitRate(i, c) : null,
         at,
         endAt: completed ? completed.endAt : null,
+        durationMs: timing && typeof timing.durationMs === 'number' ? timing.durationMs : null,
         gapMs,
         gapBasis: gapMs !== null ? prevStepBasis : null,
         streamMs: timing ? timing.streamMs : null,
@@ -318,8 +359,8 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
       if (completed) {
         prevStepEnd = completed.endAt;
         prevStepBasis = completed.basis;
-        lastPlannerEnd = completed.endAt;
-        lastPlannerBasis = completed.basis;
+        lastCallEnd = completed.endAt;
+        lastCallBasis = completed.basis;
       }
     }
 
@@ -330,9 +371,9 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
     }
 
     const fallbackEnd = ms(t.steps[t.steps.length - 1]?.created_at);
-    const end = lastPlannerEnd ?? fallbackEnd;
+    const end = lastCallEnd ?? fallbackEnd;
     const endBasis =
-      lastPlannerEnd !== null ? lastPlannerBasis : fallbackEnd !== null ? 'created_at' : null;
+      lastCallEnd !== null ? lastCallBasis : fallbackEnd !== null ? 'created_at' : null;
     const durationMs = start !== null && end !== null && end >= start ? end - start : null;
     if (end !== null) {
       prevTurnEnd = end;
@@ -362,6 +403,8 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
       gapBeforeMs,
       gapBeforeBasis,
       stepCount: stepRows.length,
+      plannerSteps,
+      compactSteps,
       meteredSteps: metered.length,
       hasUsage: metered.length > 0,
       rawStepCount: t.steps.length,
@@ -437,9 +480,14 @@ export function summarizeConversation(turns) {
   else if (generatorMatchedSteps > 0) timingSource = 'generator';
   else if (stepsMatchedSteps > 0) timingSource = 'steps';
 
+  const plannerSteps = turns.reduce((a, t) => a + (t.plannerSteps ?? t.stepCount), 0);
+  const compactSteps = turns.reduce((a, t) => a + (t.compactSteps ?? 0), 0);
+
   return {
     turns: turns.length,
     steps: turns.reduce((a, t) => a + t.stepCount, 0),
+    plannerSteps,
+    compactSteps,
     meteredSteps,
     matchedSteps,
     generatorMatchedSteps,
@@ -466,9 +514,19 @@ export function summarizeConversation(turns) {
  * Evaluates whether the context window denominator from `gen_metadata` can be
  * treated as aligned with the specific call supplying `contextUsed`.
  */
-function assessContextAlignment(meta, summary, distinctModels, lastMeteredStep, lastPlannerStep) {
+function assessContextAlignment(
+  meta,
+  summary,
+  distinctModels,
+  lastMeteredPlannerStep,
+  lastPlannerStep,
+  compactedAfterLastMetered,
+) {
+  if (compactedAfterLastMetered) {
+    return { aligned: false, reason: 'post-compaction' };
+  }
   if (!meta) return { aligned: false, reason: 'fallback' };
-  if (lastMeteredStep && lastPlannerStep && lastMeteredStep !== lastPlannerStep) {
+  if (lastMeteredPlannerStep && lastPlannerStep && lastMeteredPlannerStep !== lastPlannerStep) {
     return { aligned: false, reason: 'latest-step-unmetered' };
   }
   if (meta.lastRowHasMax === false) {
@@ -478,8 +536,9 @@ function assessContextAlignment(meta, summary, distinctModels, lastMeteredStep, 
   const multipleModels = distinctModels.size > 1;
   const multipleWindows =
     Array.isArray(meta.maxContextTokensSeen) && meta.maxContextTokensSeen.length > 1;
+  const expectedMetaRows = summary.plannerSteps ?? summary.steps;
 
-  if (metaRows !== null && metaRows < summary.steps && (multipleModels || multipleWindows)) {
+  if (metaRows !== null && metaRows < expectedMetaRows && (multipleModels || multipleWindows)) {
     return { aligned: false, reason: 'metadata-lag' };
   }
   return { aligned: true, reason: 'matched' };
@@ -502,7 +561,8 @@ export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = n
   const summary = summarizeConversation(turns);
 
   let lastPlannerStep = null;
-  let lastMeteredStep = null;
+  let lastMeteredPlannerStep = null;
+  let compactedAfterLastMetered = false;
   let lastModel = null;
   const distinctModels = new Set();
 
@@ -510,31 +570,42 @@ export function buildSnapshot({ conv, build, steps, timings, fallbackTimings = n
     const turnSteps = turns[ti].steps;
     for (let si = turnSteps.length - 1; si >= 0; si -= 1) {
       const s = turnSteps[si];
+      if (s.kind === 'compact') {
+        if (!lastMeteredPlannerStep) compactedAfterLastMetered = true;
+        continue;
+      }
       if (!lastPlannerStep) lastPlannerStep = s;
       if (s.model) {
         distinctModels.add(s.model);
         if (!lastModel) lastModel = s.model;
       }
-      if (!lastMeteredStep && s.metered) lastMeteredStep = s;
+      if (!lastMeteredPlannerStep && s.metered) lastMeteredPlannerStep = s;
     }
   }
 
-  const contextUsed = lastMeteredStep
-    ? lastMeteredStep.prompt
-    : (meta?.estimatedTokensUsed ?? null);
+  // A `CHECKPOINT` call's prompt is the *pre-compaction* context (often above
+  // `max_context_tokens`). Until a subsequent `PLANNER_RESPONSE` runs, the
+  // post-compaction context size is unknown, so report `null` instead of a
+  // stale or >100% pre-compaction bar.
+  const contextUsed = compactedAfterLastMetered
+    ? null
+    : lastMeteredPlannerStep
+      ? lastMeteredPlannerStep.prompt
+      : (meta?.estimatedTokensUsed ?? null);
   const contextMax = meta?.maxContextTokens ?? FALLBACK_CONTEXT_WINDOW;
   const alignment = assessContextAlignment(
     meta,
     summary,
     distinctModels,
-    lastMeteredStep,
+    lastMeteredPlannerStep,
     lastPlannerStep,
+    compactedAfterLastMetered,
   );
 
   return {
     conversationId: conv,
     build,
-    model: lastMeteredStep?.model || lastModel || null,
+    model: lastMeteredPlannerStep?.model || lastModel || null,
     hasUsage: summary.hasUsage,
     summary: {
       ...summary,

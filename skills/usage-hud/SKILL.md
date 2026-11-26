@@ -27,8 +27,8 @@ Read the current conversation's compact transcript at:
 
 Apply the exact same definitions used by the Usage HUD sidecar:
 
-1. **Turns**: Split the sorted `transcript.jsonl` entries (ordered by `step_index`) into turns starting at each `type === "USER_INPUT"` step. Ignore leading implicit turns that contain no `PLANNER_RESPONSE` steps.
-2. **Model calls (steps)**: Only `type === "PLANNER_RESPONSE"` entries count as model calls. Entries without numeric `input_tokens` still count as steps (`no usage`) but contribute no tokens.
+1. **Turns**: Split the sorted `transcript.jsonl` entries (ordered by `step_index`) into turns starting at each `type === "USER_INPUT"` step. Ignore leading implicit turns that contain no model calls (`PLANNER_RESPONSE` or `CHECKPOINT`).
+2. **Model calls (steps)**: Both `type === "PLANNER_RESPONSE"` and context-compaction `type === "CHECKPOINT"` entries (labeled `compact`) count as model calls. Entries without numeric `input_tokens` still count as steps (`no usage`) but contribute no tokens.
 3. **Token semantics**:
    - `input_tokens`: prompt tokens **not** served from cache.
    - `cache_read_tokens`: prompt tokens served from cache.
@@ -36,7 +36,7 @@ Apply the exact same definitions used by the Usage HUD sidecar:
    - `total = input_tokens + cache_read_tokens + output_tokens`.
    - `hitRate = cache_read_tokens / (input_tokens + cache_read_tokens)` (when denominator > 0).
 4. **Context window**:
-   - Current context used is the `prompt` (`input_tokens + cache_read_tokens`) of the most recent metered `PLANNER_RESPONSE`.
+   - Current context used is the `prompt` (`input_tokens + cache_read_tokens`) of the most recent metered `PLANNER_RESPONSE` after any compaction. If a `CHECKPOINT` just ran and no subsequent metered `PLANNER_RESPONSE` has completed yet, treat the post-compaction context size as pending (`null`) rather than showing the pre-compaction `CHECKPOINT` prompt.
    - Compare against `max_context_tokens` when known (otherwise note the `512k` fallback denominator).
 5. **Diagnosing cache loss**:
    - For each turn, compute both cache hit rate (`cache / (input + cache)`) and uncached `input_tokens` added.

@@ -688,4 +688,180 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snap.turns[0].steps[1].gapMs, 20_000);
     assert.equal(snap.turns[0].steps[1].gapBasis, 'first-token');
   });
+
+  it('includes CHECKPOINT (compact) calls in steps, tokens, and waits without polluting TPS or alignment', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-26T04:19:19Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-26T04:19:20Z',
+        model: 'gemini-4-neon-high',
+        input_tokens: 2389,
+        cache_read_tokens: 508_615,
+        output_tokens: 483,
+      },
+      {
+        step_index: 2,
+        type: 'CHECKPOINT',
+        created_at: '2026-11-26T04:19:35Z',
+        input_tokens: 3729,
+        cache_read_tokens: 511_005,
+        output_tokens: 3462,
+      },
+      {
+        step_index: 3,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-26T04:20:12Z',
+        model: 'gemini-4-neon-high',
+        input_tokens: 19_371,
+        cache_read_tokens: 0,
+        output_tokens: 1521,
+      },
+    ];
+
+    const lsTimings = {
+      byStepIndex: new Map([
+        [1, { streamMs: 1000, ttftMs: 9000, response: 400, thinking: 83, hasSplit: true, source: 'generator' }],
+        [3, { streamMs: 10_000, ttftMs: 4000, response: 1000, thinking: 521, hasSplit: true, source: 'generator' }],
+      ]),
+      bySecond: new Map(),
+      count: 2,
+      source: 'generator',
+    };
+    const checkpointFallback = {
+      byStepIndex: new Map([
+        [
+          2,
+          {
+            streamMs: null,
+            ttftMs: null,
+            durationMs: 36_000,
+            hasCompletion: true,
+            response: 3389,
+            thinking: 73,
+            hasSplit: true,
+            stepKind: 'compact',
+            source: 'steps',
+          },
+        ],
+      ]),
+      bySecond: new Map(),
+      count: 1,
+      source: 'steps',
+    };
+    const meta = {
+      maxContextTokens: 512_000,
+      maxContextTokensSeen: [256_000, 512_000],
+      estimatedTokensUsed: 26_778,
+      rows: 2, // matches plannerSteps (2), even though total steps is 3
+      validRows: 2,
+      lastRowHasMax: true,
+      source: 'gen_metadata',
+    };
+
+    // LS matched all PLANNER_RESPONSE calls, so no planner fallback is needed.
+    assert.equal(hasUnmatchedPlannerSteps(steps, lsTimings), false);
+
+    const snap = buildSnapshot({
+      conv: 'd3e1a73b',
+      build: '1',
+      steps,
+      timings: lsTimings,
+      fallbackTimings: checkpointFallback,
+      meta,
+    });
+
+    assert.equal(snap.summary.steps, 3);
+    assert.equal(snap.summary.plannerSteps, 2);
+    assert.equal(snap.summary.compactSteps, 1);
+    assert.equal(snap.summary.meteredSteps, 3);
+    assert.equal(snap.summary.generatorMatchedSteps, 2);
+    assert.equal(snap.summary.input, 2389 + 3729 + 19_371);
+    assert.equal(snap.summary.cache, 508_615 + 511_005);
+    assert.equal(snap.summary.output, 483 + 3462 + 1521);
+    assert.equal(snap.summary.thinking, 83 + 73 + 521);
+    // Streaming TPS uses only planner generator timings: (400 + 1000) / 11s
+    assert.equal(snap.summary.tpsSource, 'generator');
+    assert.equal(snap.summary.timedSteps, 2);
+    assert.ok(Math.abs(snap.summary.tps - 1400 / 11) < 1e-9);
+    // Context is taken from post-compaction step 3 and remains aligned with 2 gen_metadata rows
+    assert.equal(snap.summary.contextUsed, 19_371);
+    assert.equal(snap.summary.contextWindowAligned, true);
+    assert.equal(snap.context.alignmentReason, 'matched');
+
+    const [s1, s2, s3] = snap.turns[0].steps;
+    assert.equal(s1.kind, 'planner');
+    assert.equal(s2.kind, 'compact');
+    assert.equal(s2.model, null);
+    assert.equal(s2.prompt, 514_734);
+    assert.equal(s2.durationMs, 36_000);
+    assert.equal(s2.rate, null);
+    // Step 1 finished at 04:19:30; compact started at 04:19:35 -> 5s wait
+    assert.equal(s2.gapMs, 5000);
+    assert.equal(s2.gapBasis, 'completion');
+    // Compact finished at 04:19:35 + 36s = 04:20:11; step 3 started at 04:20:12 -> 1s wait (not 42s!)
+    assert.equal(s3.gapMs, 1000);
+    assert.equal(s3.gapBasis, 'completion');
+  });
+
+  it('reports post-compaction context as pending when CHECKPOINT is the latest step and isolates same-second timings', () => {
+    const ts = '2026-11-26T04:19:35Z';
+    const sec = Math.floor(Date.parse(ts) / 1000);
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-26T04:19:19Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: ts,
+        model: 'gemini-4-neon-high',
+        input_tokens: 2389,
+        cache_read_tokens: 508_615,
+        output_tokens: 483,
+      },
+      {
+        step_index: 2,
+        type: 'CHECKPOINT',
+        created_at: ts,
+        input_tokens: 3729,
+        cache_read_tokens: 511_005,
+        output_tokens: 3462,
+      },
+    ];
+
+    // Same-second generator timing via bySecond only: must match step 1, never step 2 (CHECKPOINT).
+    const lsBySecondOnly = {
+      byStepIndex: new Map(),
+      bySecond: new Map([
+        [sec, [{ streamMs: 1000, ttftMs: 500, response: 400, thinking: 83, hasSplit: true, source: 'generator' }]],
+      ]),
+      count: 1,
+      source: 'generator',
+    };
+    const meta = {
+      maxContextTokens: 512_000,
+      maxContextTokensSeen: [512_000],
+      estimatedTokensUsed: 506_904,
+      rows: 1,
+      validRows: 1,
+      lastRowHasMax: true,
+      source: 'gen_metadata',
+    };
+
+    const snap = buildSnapshot({
+      conv: 'd3e1a73b',
+      build: '1',
+      steps,
+      timings: lsBySecondOnly,
+      meta,
+    });
+
+    assert.equal(snap.model, 'gemini-4-neon-high');
+    assert.equal(snap.turns[0].steps[0].timingSource, 'generator');
+    assert.equal(snap.turns[0].steps[1].timingSource, null);
+    assert.equal(snap.summary.contextUsed, null);
+    assert.equal(snap.summary.contextRatio, null);
+    assert.equal(snap.summary.contextWindowAligned, false);
+    assert.equal(snap.context.alignmentReason, 'post-compaction');
+  });
 });

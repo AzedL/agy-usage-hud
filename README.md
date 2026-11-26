@@ -14,9 +14,9 @@ Everything is read locally from this machine; nothing is uploaded:
 
 | Source | Purpose |
 | --- | --- |
-| `<appData>/brain/<conv>/.system_generated/logs/transcript.jsonl` | Every step; `PLANNER_RESPONSE` carries `model`, `input_tokens`, `cache_read_tokens`, `output_tokens`, `created_at` |
-| `<appData>/conversations/<conv>.db` (`gen_metadata`) | `max_context_tokens` and `estimated_tokens_used` per model call (best effort) |
-| `<appData>/conversations/<conv>.db` (`steps`, `step_type = 15`) | Fallback timing for each model call, plus thinking/response output token split |
+| `<appData>/brain/<conv>/.system_generated/logs/transcript.jsonl` | Every step; `PLANNER_RESPONSE` and compaction `CHECKPOINT` calls carry `input_tokens`, `cache_read_tokens`, `output_tokens`, `created_at` (`PLANNER_RESPONSE` also carries `model`) |
+| `<appData>/conversations/<conv>.db` (`gen_metadata`) | `max_context_tokens` and `estimated_tokens_used` per planner call (best effort) |
+| `<appData>/conversations/<conv>.db` (`steps`, `step_type = 15, 23`) | Fallback timing for planner calls (`15`), completion timing for compaction calls (`23`), plus thinking/response output token split |
 | Language server `GetCascadeTrajectory` | `streamingDuration`, `timeToFirstToken`, and thinking/response token split per model call |
 
 `<appData>` is derived from `ANTIGRAVITY_EXECUTABLE_DATA_DIR` rather than
@@ -47,8 +47,11 @@ and `context.alignmentReason` in `/api/usage`).
 - **L2 (Turns)** — one row per turn: `17:23 24 steps +7.0m` — start clock, step
   count, and wait since the previous turn.
 - **L3 (Model calls)** — expand a turn to see one row per model call:
-  `#24 gemini-4-neon-high 409.4k +43s` — 1-based position inside the turn, model
-  name, prompt size, and wait since the previous call.
+  `#24 gemini-4-neon-high 409.4k +43s` (or `#2 compact 514.7k +5s` for context
+  compaction calls) — 1-based position inside the turn, model name or `compact`
+  badge, prompt size, and wait since the previous call. Compaction calls count
+  toward `steps` and token totals, contribute completion timing so the following
+  step's wait stays accurate, and do not report streaming `tok/s`.
 
 The turn list header shows `TURNS` on the left and `<N> total` on the right.
 `#n` on a step is its 1-based position **inside its turn**, not the transcript's

@@ -13,16 +13,18 @@ export const MAX_CONTEXT_PATH = '/1/9/10/4';
 export const ESTIMATED_USED_PATH = '/1/9/10/1';
 export const GEN_METADATA_PREFIXES = new Set(['', '/1', '/1/9', '/1/9/10']);
 
-/** Field paths inside planner steps.metadata blobs. */
+/** Field paths inside planner & checkpoint steps.metadata blobs. */
 export const STEP_CREATED = '/1/1';
 export const STEP_CREATED_NANO = '/1/2';
 export const STEP_VIEWABLE = '/6/1';
 export const STEP_VIEWABLE_NANO = '/6/2';
 export const STEP_COMPLETED = '/7/1';
 export const STEP_COMPLETED_NANO = '/7/2';
+export const STEP_FINISHED = '/8/1';
+export const STEP_FINISHED_NANO = '/8/2';
 export const STEP_THINKING = '/9/9';
 export const STEP_RESPONSE = '/9/10';
-export const STEP_METADATA_PREFIXES = new Set(['', '/1', '/6', '/7', '/9']);
+export const STEP_METADATA_PREFIXES = new Set(['', '/1', '/6', '/7', '/8', '/9']);
 
 const MAX_PROTO_FIELD_NUMBER = 536870911; // 2^29 - 1
 const UNGUIDED_MAX_FIELD_NUMBER = 20000;

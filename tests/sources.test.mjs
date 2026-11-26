@@ -283,6 +283,35 @@ describe('filesystem discovery and SQLite integration', () => {
       assert.equal(completeMetrics.timings.source, 'generator');
       assert.equal(completeMetrics.fallbackTimings, null);
 
+      // Adding a checkpoint step (step_type = 23) with /8 completion timestamp
+      // provides checkpointTimings even when LS covers all planner steps.
+      const dbCp = new DatabaseSync(dbPath);
+      const checkpointBlob = Buffer.concat([
+        encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_630), encodeVarintField(2, 200_000_000)])),
+        encodeBytesField(8, Buffer.concat([encodeVarintField(1, 1_795_441_670), encodeVarintField(2, 700_000_000)])),
+        encodeBytesField(9, Buffer.concat([encodeVarintField(9, 60), encodeVarintField(10, 3400)])),
+      ]);
+      dbCp.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(4, 23, checkpointBlob);
+      dbCp.close();
+
+      const { checkpointTimings } = await loadDbData(tmp, conv, { includeStepTimings: false });
+      assert.ok(checkpointTimings);
+      assert.equal(checkpointTimings.byStepIndex.get(4).durationMs, 40_500);
+      assert.equal(checkpointTimings.byStepIndex.get(4).streamMs, null);
+      assert.equal(checkpointTimings.byStepIndex.get(4).ttftMs, null);
+      assert.equal(checkpointTimings.byStepIndex.get(4).hasCompletion, true);
+      assert.equal(checkpointTimings.byStepIndex.get(4).stepKind, 'compact');
+      assert.equal(checkpointTimings.byStepIndex.get(4).thinking, 60);
+      assert.equal(checkpointTimings.byStepIndex.get(4).response, 3400);
+
+      const completeWithCp = await loadMetricsData(tmp, conv, {
+        env: { ANTIGRAVITY_LS_ADDRESS: 'localhost:5387', ANTIGRAVITY_CSRF_TOKEN: 'tok' },
+        fetchImpl: partialLsFetch,
+        needsFallback: () => false,
+      });
+      assert.equal(completeWithCp.timings.source, 'generator');
+      assert.equal(completeWithCp.fallbackTimings.byStepIndex.get(4).durationMs, 40_500);
+
       // Adding a final gen_metadata row without max_context_tokens flips lastRowHasMax to false
       const db2 = new DatabaseSync(dbPath);
       db2.prepare('INSERT INTO gen_metadata (idx, data) VALUES (?, ?)').run(1, Buffer.from([]));

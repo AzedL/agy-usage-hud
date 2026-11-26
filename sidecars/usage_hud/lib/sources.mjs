@@ -18,6 +18,8 @@ import {
   STEP_COMPLETED_NANO,
   STEP_CREATED,
   STEP_CREATED_NANO,
+  STEP_FINISHED,
+  STEP_FINISHED_NANO,
   STEP_METADATA_PREFIXES,
   STEP_RESPONSE,
   STEP_THINKING,
@@ -28,6 +30,7 @@ import {
 
 export const ID_RE = /^[0-9a-f][0-9a-f-]{7,}$/i;
 export const PLANNER_STEP_TYPE = 15;
+export const CHECKPOINT_STEP_TYPE = 23;
 
 let sqlitePromise = null;
 
@@ -326,22 +329,104 @@ export async function loadGeneratorTimings(conv, { env = process.env, fetchImpl 
   return extractGeneratorTimings(body);
 }
 
+function parseSqliteStepTimings(rows) {
+  const byStepIndex = new Map();
+  const bySecond = new Map();
+  let count = 0;
+
+  for (const row of rows) {
+    const buf = row?.metadata;
+    if (!buf || typeof buf.length !== 'number') continue;
+    const f = walkVarints(buf, { allowedPrefixes: STEP_METADATA_PREFIXES });
+    const created = f.get(STEP_CREATED);
+    if (typeof created !== 'number') continue;
+
+    const createdNano = f.get(STEP_CREATED_NANO) ?? 0;
+    const viewable = f.get(STEP_VIEWABLE);
+    let ttftMs = null;
+    let streamMs = null;
+    let durationMs = null;
+    let hasCompletion = false;
+
+    if (typeof viewable === 'number') {
+      const viewableNano = f.get(STEP_VIEWABLE_NANO) ?? 0;
+      const rawTtftMs =
+        (viewable - created) * 1000 + Math.round((viewableNano - createdNano) / 1e6);
+      ttftMs = rawTtftMs > 0 ? rawTtftMs : null;
+
+      const completed = f.get(STEP_COMPLETED);
+      if (typeof completed === 'number') {
+        const rawStreamMs =
+          (completed - viewable) * 1000 +
+          Math.round(((f.get(STEP_COMPLETED_NANO) ?? 0) - viewableNano) / 1e6);
+        if (rawStreamMs >= 0) {
+          hasCompletion = true;
+          if (rawStreamMs > 0) streamMs = rawStreamMs;
+        }
+      }
+    } else {
+      // Compaction (`CHECKPOINT`, step_type = 23) does not emit viewableAt (/6)
+      // or planner completedAt (/7); it records wall-clock completion in /8.
+      // Expose total duration for accurate subsequent wait gaps without feeding
+      // TTFT into streaming `tok/s`.
+      const finished = f.get(STEP_FINISHED);
+      if (typeof finished === 'number') {
+        const rawDurationMs =
+          (finished - created) * 1000 +
+          Math.round(((f.get(STEP_FINISHED_NANO) ?? 0) - createdNano) / 1e6);
+        if (rawDurationMs >= 0) {
+          durationMs = rawDurationMs;
+          hasCompletion = true;
+        }
+      }
+    }
+
+    if (ttftMs === null && streamMs === null && durationMs === null) continue;
+
+    const response = f.get(STEP_RESPONSE) ?? null;
+    const thinking = f.get(STEP_THINKING) ?? null;
+    const entry = {
+      streamMs,
+      ttftMs,
+      durationMs,
+      hasCompletion,
+      response,
+      thinking,
+      hasSplit: response !== null || thinking !== null,
+      stepKind: row.step_type === CHECKPOINT_STEP_TYPE ? 'compact' : 'planner',
+      source: 'steps',
+    };
+    if (Number.isInteger(row.idx) && !byStepIndex.has(row.idx)) {
+      byStepIndex.set(row.idx, entry);
+    }
+    appendBySecond(bySecond, created, entry);
+    count += 1;
+  }
+
+  return count > 0 ? { byStepIndex, bySecond, count, source: 'steps' } : null;
+}
+
 /**
  * Reads `gen_metadata` (for context window size) and optionally fallback
- * planner `steps` timings from `conversations/<conv>.db` over a single
- * read-only SQLite connection.
+ * planner/checkpoint `steps` timings from `conversations/<conv>.db` over a
+ * single read-only SQLite connection.
+ *
+ * When `includeStepTimings` is false, still queries lightweight `CHECKPOINT`
+ * (`step_type = 23`) rows on the same connection so compaction calls get
+ * completion timestamps even when the Language Server matches every planner
+ * step (LS `generatorMetadata` does not include checkpoints).
  *
  * @param {string} appData
  * @param {string} conv
  * @param {{ includeStepTimings?: boolean }} [options]
- * @returns {Promise<{ meta: object | null, stepTimings: object | null }>}
+ * @returns {Promise<{ meta: object | null, stepTimings: object | null, checkpointTimings: object | null }>}
  */
 export async function loadDbData(appData, conv, { includeStepTimings = false } = {}) {
   const dbPath = convDbPath(appData, conv);
-  if (!existsSync(dbPath)) return { meta: null, stepTimings: null };
+  if (!existsSync(dbPath)) return { meta: null, stepTimings: null, checkpointTimings: null };
 
   const DatabaseSync = await getDatabaseSync();
-  if (!DatabaseSync) return { meta: null, stepTimings: null };
+  if (!DatabaseSync) return { meta: null, stepTimings: null, checkpointTimings: null };
 
   let db;
   try {
@@ -384,71 +469,30 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
     }
 
     let stepTimings = null;
+    let checkpointTimings = null;
     if (includeStepTimings) {
       try {
         const rows = db
-          .prepare('select idx, metadata from steps where step_type = ? order by idx')
-          .all(PLANNER_STEP_TYPE);
-        const byStepIndex = new Map();
-        const bySecond = new Map();
-        let count = 0;
-
-        for (const row of rows) {
-          const buf = row?.metadata;
-          if (!buf || typeof buf.length !== 'number') continue;
-          const f = walkVarints(buf, { allowedPrefixes: STEP_METADATA_PREFIXES });
-          const created = f.get(STEP_CREATED);
-          const viewable = f.get(STEP_VIEWABLE);
-          if (typeof created !== 'number' || typeof viewable !== 'number') continue;
-          const rawTtftMs =
-            (viewable - created) * 1000 +
-            Math.round(((f.get(STEP_VIEWABLE_NANO) ?? 0) - (f.get(STEP_CREATED_NANO) ?? 0)) / 1e6);
-          const ttftMs = rawTtftMs > 0 ? rawTtftMs : null;
-
-          const completed = f.get(STEP_COMPLETED);
-          let streamMs = null;
-          let hasCompletion = false;
-          if (typeof completed === 'number') {
-            const rawStreamMs =
-              (completed - viewable) * 1000 +
-              Math.round(
-                ((f.get(STEP_COMPLETED_NANO) ?? 0) - (f.get(STEP_VIEWABLE_NANO) ?? 0)) / 1e6,
-              );
-            if (rawStreamMs >= 0) {
-              hasCompletion = true;
-              if (rawStreamMs > 0) streamMs = rawStreamMs;
-            }
-          }
-          if (ttftMs === null && streamMs === null) continue;
-
-          const response = f.get(STEP_RESPONSE) ?? null;
-          const thinking = f.get(STEP_THINKING) ?? null;
-          const entry = {
-            streamMs,
-            ttftMs,
-            hasCompletion,
-            response,
-            thinking,
-            hasSplit: response !== null || thinking !== null,
-            source: 'steps',
-          };
-          if (Number.isInteger(row.idx) && !byStepIndex.has(row.idx)) {
-            byStepIndex.set(row.idx, entry);
-          }
-          appendBySecond(bySecond, created, entry);
-          count += 1;
-        }
-        if (count > 0) {
-          stepTimings = { byStepIndex, bySecond, count, source: 'steps' };
-        }
+          .prepare('select idx, step_type, metadata from steps where step_type in (?, ?) order by idx')
+          .all(PLANNER_STEP_TYPE, CHECKPOINT_STEP_TYPE);
+        stepTimings = parseSqliteStepTimings(rows);
       } catch {
         stepTimings = null;
       }
+    } else {
+      try {
+        const rows = db
+          .prepare('select idx, step_type, metadata from steps where step_type = ? order by idx')
+          .all(CHECKPOINT_STEP_TYPE);
+        checkpointTimings = parseSqliteStepTimings(rows);
+      } catch {
+        checkpointTimings = null;
+      }
     }
 
-    return { meta, stepTimings };
+    return { meta, stepTimings, checkpointTimings };
   } catch {
-    return { meta: null, stepTimings: null };
+    return { meta: null, stepTimings: null, checkpointTimings: null };
   } finally {
     try {
       db?.close();
@@ -460,11 +504,12 @@ export async function loadDbData(appData, conv, { includeStepTimings = false } =
 
 /**
  * Loads timing and context metadata for `conv`.
- * Runs the language server RPC in parallel with `gen_metadata` when LS env vars
- * are present. If LS is unavailable OR `needsFallback(fromLs)` returns true
- * (indicating at least one planner step failed to match LS), also loads
- * fallback `steps` timings from SQLite so unmatched calls can fall back
- * individually without losing LS timings on matched calls.
+ * Runs the language server RPC in parallel with `gen_metadata` (and lightweight
+ * checkpoint step timings) when LS env vars are present. If LS is unavailable
+ * OR `needsFallback(fromLs)` returns true (indicating at least one planner step
+ * failed to match LS), also loads fallback `steps` timings from SQLite so
+ * unmatched calls can fall back individually without losing LS timings on
+ * matched calls.
  *
  * @param {string} appData
  * @param {string} conv
@@ -492,7 +537,11 @@ export async function loadMetricsData(appData, conv, options = {}) {
     !fromLs || (typeof options.needsFallback === 'function' && options.needsFallback(fromLs));
 
   if (!shouldLoadFallback) {
-    return { meta: dbInitial.meta, timings: fromLs, fallbackTimings: null };
+    return {
+      meta: dbInitial.meta,
+      timings: fromLs,
+      fallbackTimings: dbInitial.checkpointTimings,
+    };
   }
 
   const fallback = await loadDbData(appData, conv, { includeStepTimings: true });

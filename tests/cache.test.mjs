@@ -4,6 +4,7 @@ import { isTimingComplete, SnapshotCache } from '../sidecars/usage_hud/lib/cache
 
 function makePayload({
   steps,
+  plannerSteps,
   meteredSteps = steps,
   generatorMatchedSteps,
   hasUsage = true,
@@ -13,6 +14,7 @@ function makePayload({
     hasUsage,
     summary: {
       steps,
+      ...(plannerSteps !== undefined ? { plannerSteps } : {}),
       meteredSteps,
       generatorMatchedSteps,
       timingSource,
@@ -37,6 +39,16 @@ describe('SnapshotCache completeness and retry policy', () => {
 
     const complete = makePayload({ steps: 100, generatorMatchedSteps: 100, timingSource: 'generator' });
     assert.equal(isTimingComplete(complete, true), true);
+
+    // Compaction (CHECKPOINT) calls are not in LS generatorMetadata; matching all
+    // plannerSteps (98/98) marks timing complete even when total steps is 100.
+    const withCompact = makePayload({
+      steps: 100,
+      plannerSteps: 98,
+      generatorMatchedSteps: 98,
+      timingSource: 'mixed',
+    });
+    assert.equal(isTimingComplete(withCompact, true), true);
   });
 
   it('retries partial LS snapshots with backoff, then probes at steadyRetryMs until LS catches up', () => {

@@ -34,9 +34,9 @@
     return n;
   }
 
-  function metric(k, v) {
+  function metric(k, v, valueClass) {
     const wrap = el('div', 'metric');
-    wrap.append(el('span', 'k', k), el('span', 'v', v));
+    wrap.append(el('span', 'k', k), el('span', valueClass ? 'v ' + valueClass : 'v', v));
     return wrap;
   }
 
@@ -72,6 +72,9 @@
   }
 
   function contextTooltip(reason) {
+    if (reason === 'post-compaction') {
+      return 'Context was just compacted (awaiting next model call for updated size)';
+    }
     if (reason === 'fallback') return 'Estimated context window (fallback 512k)';
     if (reason === 'latest-step-unmetered') {
       return 'Estimated context window (latest call has no token usage; numerator is from an earlier call)';
@@ -132,7 +135,8 @@
       grid.append(metric('output', tok(s.output)));
       grid.append(tpsNode);
       grid.append(metric('total', tok(s.total)));
-      grid.append(metric('hit', pct(s.hitRate)));
+      const hitBand = hitClass(s.hitRate);
+      grid.append(metric('hit', pct(s.hitRate), hitBand ? 'hit ' + hitBand : ''));
     }
     card.append(grid);
 
@@ -177,16 +181,26 @@
     return el('span', 'hit ' + hitClass(rate), hasRate ? pct(rate) : '\u2014');
   }
 
-  /** "#24 gemini-4-neon-high 409.4k +43s" */
+  /** "#24 gemini-4-neon-high 409.4k +43s" or "#2 compact 514.7k +5s" */
   function renderSteps(turn) {
     const box = el('div', 'steps');
     for (const st of [...turn.steps].reverse()) {
-      const row = el('div', 'row');
+      const isCompact = st.kind === 'compact';
+      const row = el('div', isCompact ? 'row compact' : 'row');
       row.append(el('span', 'lbl', '#' + st.index));
 
       const mid = el('div', 'mid');
       const line = el('div', 'line1');
-      line.append(el('span', 'model', st.model || '\u2014'));
+      if (isCompact) {
+        const badge = el('span', 'badge compact', 'compact');
+        badge.title =
+          st.durationMs !== null && st.durationMs !== undefined
+            ? `Context compaction call (${dur(st.durationMs)})`
+            : 'Context compaction call';
+        line.append(badge);
+      } else {
+        line.append(el('span', 'model', st.model || '\u2014'));
+      }
       if (st.prompt !== null) line.append(el('span', 'num', tok(st.prompt)));
       // The first step of the conversation has nothing before it.
       if (st.gapMs !== null) line.append(waitSpan(st.gapMs, st.gapBasis));
