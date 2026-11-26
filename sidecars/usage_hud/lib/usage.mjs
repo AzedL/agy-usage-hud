@@ -120,9 +120,8 @@ function stepKindOf(step) {
  * Independently matches model-call steps to timing records within a single
  * source (Pass 1: exact `byStepIndex`, Pass 2: `bySecond` queue fallback),
  * using a shared `consumed` Set so no entry in that source can be consumed
- * twice. When a timing entry carries `stepKind`, Pass 2 refuses cross-kind
- * matches (e.g. a `compact` entry cannot match a `planner` step in the same
- * second).
+ * twice. When a timing entry carries `stepKind`, both passes refuse cross-kind
+ * matches (e.g. a `compact` entry cannot match a `planner` step).
  */
 function matchSourceTimings(modelSteps, source) {
   const matched = new Map();
@@ -136,7 +135,12 @@ function matchSourceTimings(modelSteps, source) {
     for (const d of eligible) {
       if (typeof d.step_index !== 'number') continue;
       const entry = source.byStepIndex.get(d.step_index);
-      if (entry && !consumed.has(entry)) {
+      const kind = stepKindOf(d);
+      if (
+        entry &&
+        !consumed.has(entry) &&
+        (!entry.stepKind || entry.stepKind === kind)
+      ) {
         matched.set(d, entry);
         consumed.add(entry);
       }
@@ -307,9 +311,9 @@ export function aggregateTurns(turns, timings, fallbackTimings = null) {
       const completed = estimateStepEnd(at, timing);
 
       const streamedOutput =
-        timing && isMetered ? effectiveStreamedOutput(timing, o) : null;
+        kind === 'planner' && timing && isMetered ? effectiveStreamedOutput(timing, o) : null;
       const hasTimedOutput = Boolean(
-        timing && isMetered && timing.streamMs > 0 && streamedOutput > 0,
+        kind === 'planner' && timing && isMetered && timing.streamMs > 0 && streamedOutput > 0,
       );
 
       if (hasTimedOutput) {
@@ -454,7 +458,7 @@ export function summarizeConversation(turns) {
         if (s.timingSource === 'generator') generatorMatchedSteps += 1;
         else if (s.timingSource === 'steps') stepsMatchedSteps += 1;
       }
-      if (s.metered && s.streamMs > 0 && s.streamedOutput > 0) {
+      if (s.kind !== 'compact' && s.metered && s.streamMs > 0 && s.streamedOutput > 0) {
         if (s.timingSource === 'generator') {
           genStreamMs += s.streamMs;
           genStreamedOutput += s.streamedOutput;

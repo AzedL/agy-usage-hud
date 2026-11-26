@@ -308,10 +308,13 @@ describe('filesystem discovery and SQLite integration', () => {
       assert.equal(completeMetrics.fallbackTimings, null);
 
       // Adding a checkpoint step (step_type = 23) with /8 completion timestamp
-      // provides checkpointTimings even when LS covers all planner steps.
+      // (plus synthetic /6 & /7 to verify step_type takes precedence over viewableAt)
+      // provides checkpointTimings without emitting streamMs/ttftMs.
       const dbCp = new DatabaseSync(dbPath);
       const checkpointBlob = Buffer.concat([
         encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_630), encodeVarintField(2, 200_000_000)])),
+        encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_635), encodeVarintField(2, 0)])),
+        encodeBytesField(7, Buffer.concat([encodeVarintField(1, 1_795_441_670), encodeVarintField(2, 700_000_000)])),
         encodeBytesField(8, Buffer.concat([encodeVarintField(1, 1_795_441_670), encodeVarintField(2, 700_000_000)])),
         encodeBytesField(9, Buffer.concat([encodeVarintField(9, 60), encodeVarintField(10, 3400)])),
       ]);

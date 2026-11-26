@@ -864,4 +864,75 @@ describe('turn grouping and aggregation', () => {
     assert.equal(snap.summary.contextWindowAligned, false);
     assert.equal(snap.context.alignmentReason, 'post-compaction');
   });
+
+  it('enforces stepKind on byStepIndex matches and excludes compact calls from TPS even if streamMs is supplied', () => {
+    const steps = [
+      { step_index: 0, type: 'USER_INPUT', created_at: '2026-11-26T04:19:19Z' },
+      {
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-26T04:19:20Z',
+        model: 'gemini-4-neon-high',
+        input_tokens: 1000,
+        cache_read_tokens: 9000,
+        output_tokens: 200,
+      },
+      {
+        step_index: 2,
+        type: 'CHECKPOINT',
+        created_at: '2026-11-26T04:19:30Z',
+        input_tokens: 2000,
+        cache_read_tokens: 10_000,
+        output_tokens: 4000,
+      },
+    ];
+
+    // Index 1 holds a mismatched `compact` record -> planner step 1 must NOT consume it.
+    // Index 2 holds a `compact` record that even carries synthetic streamMs -> must NOT contribute to L1/L2/L3 TPS.
+    const timings = {
+      byStepIndex: new Map([
+        [
+          1,
+          {
+            streamMs: null,
+            ttftMs: null,
+            durationMs: 5000,
+            hasCompletion: true,
+            response: 100,
+            thinking: 0,
+            hasSplit: true,
+            stepKind: 'compact',
+            source: 'steps',
+          },
+        ],
+        [
+          2,
+          {
+            streamMs: 2000,
+            ttftMs: 500,
+            durationMs: 2500,
+            hasCompletion: true,
+            response: 4000,
+            thinking: 0,
+            hasSplit: true,
+            stepKind: 'compact',
+            source: 'steps',
+          },
+        ],
+      ]),
+      bySecond: new Map(),
+      count: 2,
+      source: 'steps',
+    };
+
+    const snap = buildSnapshot({ conv: 'd3e1a73b', build: '1', steps, timings, meta: null });
+    assert.equal(snap.turns[0].steps[0].timingSource, null);
+    assert.equal(snap.turns[0].steps[1].timingSource, 'steps');
+    assert.equal(snap.turns[0].steps[1].rate, null);
+    assert.equal(snap.turns[0].steps[1].streamedOutput, null);
+    assert.equal(snap.turns[0].tps, null);
+    assert.equal(snap.turns[0].timedSteps, 0);
+    assert.equal(snap.summary.tps, null);
+    assert.equal(snap.summary.timedSteps, 0);
+  });
 });

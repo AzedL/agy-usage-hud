@@ -342,13 +342,29 @@ function parseSqliteStepTimings(rows) {
     if (typeof created !== 'number') continue;
 
     const createdNano = f.get(STEP_CREATED_NANO) ?? 0;
-    const viewable = f.get(STEP_VIEWABLE);
+    const isCheckpoint = row.step_type === CHECKPOINT_STEP_TYPE;
     let ttftMs = null;
     let streamMs = null;
     let durationMs = null;
     let hasCompletion = false;
 
-    if (typeof viewable === 'number') {
+    if (isCheckpoint) {
+      // Compaction (`CHECKPOINT`, step_type = 23) records wall-clock completion
+      // in /8 and never contributes streaming `tok/s`, even if a future build
+      // emits /6 or /7.
+      const finished = f.get(STEP_FINISHED);
+      if (typeof finished === 'number') {
+        const rawDurationMs =
+          (finished - created) * 1000 +
+          Math.round(((f.get(STEP_FINISHED_NANO) ?? 0) - createdNano) / 1e6);
+        if (rawDurationMs >= 0) {
+          durationMs = rawDurationMs;
+          hasCompletion = true;
+        }
+      }
+    } else {
+      const viewable = f.get(STEP_VIEWABLE);
+      if (typeof viewable !== 'number') continue;
       const viewableNano = f.get(STEP_VIEWABLE_NANO) ?? 0;
       const rawTtftMs =
         (viewable - created) * 1000 + Math.round((viewableNano - createdNano) / 1e6);
@@ -365,21 +381,6 @@ function parseSqliteStepTimings(rows) {
           if (rawStreamMs > 0) streamMs = rawStreamMs;
         }
       }
-    } else {
-      // Compaction (`CHECKPOINT`, step_type = 23) does not emit viewableAt (/6)
-      // or planner completedAt (/7); it records wall-clock completion in /8.
-      // Expose total duration for accurate subsequent wait gaps without feeding
-      // TTFT into streaming `tok/s`.
-      const finished = f.get(STEP_FINISHED);
-      if (typeof finished === 'number') {
-        const rawDurationMs =
-          (finished - created) * 1000 +
-          Math.round(((f.get(STEP_FINISHED_NANO) ?? 0) - createdNano) / 1e6);
-        if (rawDurationMs >= 0) {
-          durationMs = rawDurationMs;
-          hasCompletion = true;
-        }
-      }
     }
 
     if (ttftMs === null && streamMs === null && durationMs === null && !hasCompletion) continue;
@@ -394,7 +395,7 @@ function parseSqliteStepTimings(rows) {
       response,
       thinking,
       hasSplit: response !== null || thinking !== null,
-      stepKind: row.step_type === CHECKPOINT_STEP_TYPE ? 'compact' : 'planner',
+      stepKind: isCheckpoint ? 'compact' : 'planner',
       source: 'steps',
     };
     if (Number.isInteger(row.idx) && !byStepIndex.has(row.idx)) {
