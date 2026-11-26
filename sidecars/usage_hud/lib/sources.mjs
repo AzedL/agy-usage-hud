@@ -352,6 +352,7 @@ function parseSqliteStepTimings(rows) {
       const viewableNano = f.get(STEP_VIEWABLE_NANO) ?? 0;
       const rawTtftMs =
         (viewable - created) * 1000 + Math.round((viewableNano - createdNano) / 1e6);
+      if (rawTtftMs < 0) continue;
       ttftMs = rawTtftMs > 0 ? rawTtftMs : null;
 
       const completed = f.get(STEP_COMPLETED);
@@ -381,7 +382,7 @@ function parseSqliteStepTimings(rows) {
       }
     }
 
-    if (ttftMs === null && streamMs === null && durationMs === null) continue;
+    if (ttftMs === null && streamMs === null && durationMs === null && !hasCompletion) continue;
 
     const response = f.get(STEP_RESPONSE) ?? null;
     const thinking = f.get(STEP_THINKING) ?? null;

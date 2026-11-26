@@ -211,6 +211,24 @@ describe('filesystem discovery and SQLite integration', () => {
         encodeBytesField(9, Buffer.concat([encodeVarintField(9, 80)])),
       ]);
       db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(3, 15, zeroStreamBlob);
+
+      // Step 5: negative TTFT (viewableAt < createdAt) -> corrupt timestamp order must be rejected
+      const negTtftBlob = Buffer.concat([
+        encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_625), encodeVarintField(2, 0)])),
+        encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_623), encodeVarintField(2, 0)])),
+        encodeBytesField(7, Buffer.concat([encodeVarintField(1, 1_795_441_630), encodeVarintField(2, 0)])),
+        encodeBytesField(9, Buffer.concat([encodeVarintField(10, 200)])),
+      ]);
+      db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(5, 15, negTtftBlob);
+
+      // Step 6: zero TTFT AND zero streaming (created == viewable == completed) -> retain hasCompletion
+      const zeroBothBlob = Buffer.concat([
+        encodeBytesField(1, Buffer.concat([encodeVarintField(1, 1_795_441_640), encodeVarintField(2, 0)])),
+        encodeBytesField(6, Buffer.concat([encodeVarintField(1, 1_795_441_640), encodeVarintField(2, 0)])),
+        encodeBytesField(7, Buffer.concat([encodeVarintField(1, 1_795_441_640), encodeVarintField(2, 0)])),
+        encodeBytesField(9, Buffer.concat([encodeVarintField(10, 5)])),
+      ]);
+      db.prepare('INSERT INTO steps (idx, step_type, metadata) VALUES (?, ?, ?)').run(6, 15, zeroBothBlob);
       db.close();
 
       const { meta, stepTimings } = await loadDbData(tmp, conv, { includeStepTimings: true });
@@ -232,6 +250,12 @@ describe('filesystem discovery and SQLite integration', () => {
       assert.equal(stepTimings.byStepIndex.get(3).ttftMs, 1000);
       assert.equal(stepTimings.byStepIndex.get(3).streamMs, null);
       assert.equal(stepTimings.byStepIndex.get(3).hasCompletion, true);
+
+      assert.equal(stepTimings.byStepIndex.has(5), false);
+
+      assert.equal(stepTimings.byStepIndex.get(6).ttftMs, null);
+      assert.equal(stepTimings.byStepIndex.get(6).streamMs, null);
+      assert.equal(stepTimings.byStepIndex.get(6).hasCompletion, true);
 
       // Without LS env, loadMetricsData returns both meta and steps timings cleanly
       const metrics = await loadMetricsData(tmp, conv, { env: {} });
